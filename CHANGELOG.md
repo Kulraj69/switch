@@ -58,6 +58,16 @@ version of their own to them without also giving them a release of their own.
   itself up, its rules with the people, agents and rooms they name. So an
   agent can tell someone who may answer its questions and approvals instead
   of guessing. Another agent sees only the kind.
+- **The Airtable connection.** A person connects Airtable from Switch Console,
+  choosing at Airtable's consent screen which bases and workspaces to share,
+  and a granted agent reads and updates records and comments in them, as that
+  person, through Airtable's MCP server. Nothing is configured on the server:
+  Core registers its own client with Airtable. Airtable offers no read-only
+  sign-in, so every connection can write; changing tables and fields is not
+  asked for, and Airtable refuses it. On Enterprise plans an Airtable admin may
+  have to allowlist the client. Airtable cannot revoke a sign-in, so
+  disconnecting says so and points to Airtable's own settings, as any OAuth
+  service without revocation now does rather than reporting a failed revoke.
 
 #### Changed
 - **Following the conversation is described the same way everywhere, and the
@@ -1883,6 +1893,9 @@ version of their own to them without also giving them a release of their own.
 ## switch-console
 
 ### [Unreleased]
+
+#### Added
+- **Airtable's logo on the Connections grid.**
 
 #### Changed
 - **One name for the controller.** Console, the Gateway and the docs say
