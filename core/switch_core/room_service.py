@@ -195,6 +195,12 @@ class RoomService:
         # The shared delivery read; told when a room goes.
         self._room_cache = room_cache
 
+    @property
+    def telemetry(self) -> TelemetryService | None:
+        """Where room changes are reported, for callers that change a room's
+        settings outside this service."""
+        return self._telemetry
+
     def on_room_agents_changed(
         self, listener: Callable[[str, str], Awaitable[None]]
     ) -> None:
