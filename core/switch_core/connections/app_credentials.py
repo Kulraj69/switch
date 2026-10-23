@@ -134,6 +134,15 @@ def cannot_work_here(name: str) -> str:
     )
 
 
+def needs_public_url(name: str) -> str:
+    """What members are told about a service whose sign-ins return only to
+    the server, on a server without a public address."""
+    return (
+        f"{name} can't be connected on this server: it needs the server's "
+        "public address (GATEWAY_PUBLIC_URL)."
+    )
+
+
 @dataclass(frozen=True)
 class AppSpec:
     """A catalog entry that needs an app, and what configures it."""

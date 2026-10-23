@@ -221,6 +221,32 @@ def test_an_app_not_set_up_here_says_who_sets_it_up(
         assert broker.server_setup_needed(service) is True
 
 
+def test_a_service_signing_in_only_through_the_server_needs_its_public_url(
+    tmp_path: Path, session_factory
+) -> None:
+    core_only = STATIC.replace("redirect: [loopback, core]", "redirect: [core]")
+    broker = _broker(_catalog(tmp_path, core_only), session_factory, {}, None)
+    example = broker.unavailable("example")
+    assert example is not None
+    assert example.code == "needs_public_url"
+    assert example.reason == (
+        "Example can't be connected on this server: it needs the server's "
+        "public address (GATEWAY_PUBLIC_URL)."
+    )
+    assert broker.server_setup_needed("example") is False
+    # GitHub's App names its own callback, so it isn't held up the same way.
+    github = broker.unavailable("github")
+    assert github is not None and github.code == "app_not_set_up"
+    with_url = _broker(
+        _catalog(tmp_path / "again", core_only),
+        session_factory,
+        {},
+        "https://switch.example.test",
+    )
+    example = with_url.unavailable("example")
+    assert example is not None and example.code == "app_not_set_up"
+
+
 def test_github_cannot_work_on_a_server_without_an_https_address(
     tmp_path: Path, session_factory
 ) -> None:

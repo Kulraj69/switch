@@ -67,7 +67,9 @@ version of their own to them without also giving them a release of their own.
   `switchCore.airtableClientSecret`); see `docs/old/airtable-setup.md`.
   Without it, Airtable is listed as not set up. Like Google Workspace, it
   needs `GATEWAY_PUBLIC_URL`: Airtable sends people back to the server's own
-  callback.
+  callback. On a server without one, both are listed as unavailable
+  (`needs_public_url`), saying why, rather than failing when someone
+  connects.
   Airtable offers no read-only sign-in, so every connection can write;
   changing tables and fields is not asked for, and Airtable refuses it.
   Airtable cannot revoke a sign-in, and an integration reaches the bases of
@@ -1916,6 +1918,9 @@ version of their own to them without also giving them a release of their own.
   the operator to confirm the integration's support details are set, which no
   check can see. A server that does not send `redirect_uris`,
   `needs_public_url` and `scopes` is read as before.
+- **Connectors says why Airtable or Google Workspace can't be connected on a
+  server without a public address**: the operator is told to set
+  `GATEWAY_PUBLIC_URL`, and everyone else whom to ask.
 
 #### Changed
 - **One name for the controller.** Console, the Gateway and the docs say
