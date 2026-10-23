@@ -1417,6 +1417,11 @@ async def run(config: SwitchConfig, process_id: str) -> None:
 
     agent_bridge_app.router.lifespan_context = lifespan  # type: ignore[assignment]
 
+    # Before the runtime starts: what follows is the clients, bridges and work
+    # this process owns, which ownership hands to another replica as replicas
+    # come and go, so it must stay collectable.
+    _freeze_boot_objects()
+
     # ── Start runtime ────────────────────────────────────────────────────────
     await client_lifecycle.start_all()
     # Before the bridges start, so none on a shared app runs without the
@@ -1496,7 +1501,6 @@ async def run(config: SwitchConfig, process_id: str) -> None:
     async with boot_lock(config):
         await room_service.reconcile_room_clients()
 
-    _freeze_boot_objects()
     logger.info(
         "Switch is running on http://%s:%d", config.server_host, config.server_port
     )
@@ -1562,6 +1566,14 @@ def _freeze_boot_objects() -> None:
     minute is what stalls the event loop for hundreds of milliseconds.
     `gc.freeze` moves it to a permanent generation the collector skips, so
     full collections only walk what was allocated since.
+
+    Called before the runtime starts, not once it is serving. A frozen object
+    is still freed when its last reference goes, but one caught in a reference
+    cycle never is, and the clients and bridges a process runs are full of
+    cycles (tasks, callbacks, sessions). With several replicas, ownership moves
+    that work between processes whenever one joins or leaves, so freezing it
+    would keep every client and bridge this process started at boot alive
+    after it hands them over.
     """
     gc.collect()
     gc.freeze()
