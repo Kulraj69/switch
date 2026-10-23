@@ -3,6 +3,7 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   CircularProgress,
   Dialog,
   DialogActions,
@@ -30,6 +31,7 @@ import {
 import {
   type Audience,
   asksWhoConnects,
+  confirmBeforeCheck,
   peopleIn,
   type SecretField,
   secretFields,
@@ -153,10 +155,12 @@ export default function SetupDialog({
   const [field, setField] = useState<ConnectorAppField | null>(null);
   const [busy, setBusy] = useState(false);
   const [impact, setImpact] = useState<ConnectorAppImpact | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setStep(first);
+    setConfirmed(false);
     setClientId(mode === "enter_again" ? (app.saved_client_id ?? "") : "");
     setSecrets({});
     setError(null);
@@ -165,7 +169,11 @@ export default function SetupDialog({
   }, [open, first, mode, app.saved_client_id]);
 
   const fields = secretFields(app);
-  const complete = clientId.trim() !== "" && fields.every((f) => (secrets[f.name] ?? "") !== "");
+  const confirmation = confirmBeforeCheck(app);
+  const complete =
+    clientId.trim() !== "" &&
+    fields.every((f) => (secrets[f.name] ?? "") !== "") &&
+    (confirmation === null || confirmed);
   const replacing = app.saved_client_id !== null && clientId.trim() !== app.saved_client_id;
 
   const save = async () => {
@@ -286,6 +294,17 @@ export default function SetupDialog({
                 <Typography variant="caption" color="text.secondary">
                   The App&apos;s name is read from GitHub when Switch checks it.
                 </Typography>
+              )}
+              {confirmation && (
+                <FormControlLabel
+                  control={
+                    <Checkbox
+                      checked={confirmed}
+                      onChange={(event) => setConfirmed(event.target.checked)}
+                    />
+                  }
+                  label={confirmation}
+                />
               )}
               {error && <Alert severity="error">{error}</Alert>}
               {mode === "enter_again" && replacing && (

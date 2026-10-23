@@ -6,6 +6,7 @@ import type { BaseModalProps } from '@renderer/lib/modal/modal-provider';
 import { useCloseGuard } from '@renderer/lib/modal/use-close-guard';
 import { openExternalUrl } from '@renderer/lib/open-external';
 import { Button } from '@renderer/lib/ui/button';
+import { Checkbox } from '@renderer/lib/ui/checkbox';
 import {
   DialogContentArea,
   DialogFooter,
@@ -27,6 +28,7 @@ import {
   type SecretField,
   UPDATE_SECRET_NOTE,
   asksWhoConnects,
+  confirmBeforeCheck,
   menuLabel,
   moveChecklist,
   peopleIn,
@@ -206,13 +208,18 @@ export function ConnectorAppSetupDialog({
   const [refusal, setRefusal] = useState<Refusal | null>(null);
   const [busy, setBusy] = useState(false);
   const [impact, setImpact] = useState<ConnectorAppImpact | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
   useCloseGuard(busy);
   const save = useSave(serverId, app.slug, `Could not save ${app.name}'s app.`);
 
   const vendor = vendorName(app);
   const fields = secretFields(app);
   const id = clientId.trim();
-  const complete = id !== '' && fields.every((field) => (secrets[field.name] ?? '') !== '');
+  const confirmation = confirmBeforeCheck(app);
+  const complete =
+    id !== '' &&
+    fields.every((field) => (secrets[field.name] ?? '') !== '') &&
+    (confirmation === null || confirmed);
   const replacing = app.saved_client_id !== null && id !== app.saved_client_id;
   const index = steps.indexOf(step);
   const stepName = {
@@ -356,6 +363,17 @@ export function ConnectorAppSetupDialog({
               <p className="text-xs text-foreground-muted">
                 The App&apos;s name is read from GitHub when Switch checks it.
               </p>
+            )}
+            {confirmation && (
+              <label className="flex items-start gap-2 text-sm">
+                <Checkbox
+                  checked={confirmed}
+                  disabled={busy}
+                  onCheckedChange={(checked) => setConfirmed(checked === true)}
+                  className="mt-0.5"
+                />
+                {confirmation}
+              </label>
             )}
             {mode === 'enter_again' && replacing && (
               <p role="status" className="text-sm text-foreground-warning">

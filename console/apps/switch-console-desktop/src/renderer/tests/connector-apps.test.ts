@@ -8,6 +8,7 @@ import {
   cardState,
   changeBlocked,
   configuredSentence,
+  confirmBeforeCheck,
   menuActions,
   menuLabel,
   missingPublicUrl,
@@ -355,6 +356,13 @@ const AIRTABLE = app({
 });
 
 describe('an app that sends people back to Switch Console', () => {
+  it('asks the operator to confirm what no check can see: that the integration is published', () => {
+    expect(confirmBeforeCheck(AIRTABLE)).toMatch(
+      /support email, privacy policy URL and terms of service URL/
+    );
+    expect(confirmBeforeCheck(NONE)).toBeNull();
+  });
+
   it("walks Airtable's Builder Hub, with every redirect to paste and the scopes to tick", () => {
     const steps = setupInstructions(AIRTABLE, 'internal', null);
     expect(steps[0]!.link).toEqual({

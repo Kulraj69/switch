@@ -182,6 +182,32 @@ describe("ConnectorAppsPage", () => {
     });
   });
 
+  it("saves Airtable only once the operator confirms it is published, which no check can see", async () => {
+    const airtable = {
+      ...NONE_GOOGLE,
+      slug: "airtable",
+      name: "Airtable",
+      redirect_uri: "http://127.0.0.1:39231/switch-services/callback",
+      redirect_uris: ["http://127.0.0.1:39231/switch-services/callback"],
+      needs_public_url: false,
+      scopes: ["data.records:read"],
+    };
+    const calls = serve(listOf(airtable), {
+      "PUT /gateway/connector-apps/airtable": [200, { ...airtable, source: "saved" }],
+    });
+    render(<ConnectorAppsPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Set up Airtable" }));
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(screen.getByLabelText("Client ID"), { target: { value: "example-client-id" } });
+    fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "example-secret" } });
+    const save = screen.getByRole("button", { name: "Check and save" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText(/support email, privacy policy URL and terms of service URL/));
+    expect(save.disabled).toBe(false);
+    fireEvent.click(save);
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+  });
+
   it("reads GitHub's private key from its file and never shows it", async () => {
     const calls = serve(
       listOf({ ...GITHUB, ...NONE_GOOGLE, slug: "github", name: "GitHub", kind: "github_app" }),

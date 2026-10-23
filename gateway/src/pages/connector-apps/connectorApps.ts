@@ -388,6 +388,13 @@ export function removeWarning(app: ConnectorApp): string {
   return `Nobody will be able to connect ${name}, and ${people} connected now lose it. They can still disconnect.`;
 }
 
+/** What the operator confirms before the check, because asking the vendor cannot show it. */
+export function confirmBeforeCheck(app: Pick<ConnectorApp, "slug">): string | null {
+  return app.slug === AIRTABLE
+    ? "I've set its support email, privacy policy URL and terms of service URL."
+    : null;
+}
+
 export interface ChecklistItem {
   text: string;
   done: boolean;

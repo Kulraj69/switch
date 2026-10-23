@@ -12,9 +12,10 @@ request it must refuse, and reads which refusal it chose.
   redirect URI the client registers: Core's own callback, or Switch
   Console's first loopback one. `invalid_grant` means the client id and
   secret are right; `invalid_client` that they are not; and
-  `redirect_uri_mismatch` that the redirect URI is not registered. Airtable
-  compares redirect URIs only with a real code, so its are confirmed by the
-  first sign-in.
+  `redirect_uri_mismatch` that the redirect URI is not registered. What the
+  vendor does not show this way (Airtable compares redirect URIs only with a
+  real code, and says nothing of whether the integration is published) is the
+  entry's `unchecked`, said with the result.
 
 What a check cannot prove (an App's permissions, a Google app's user type,
 which APIs are switched on) is left to the vendor's own pages.
@@ -234,16 +235,15 @@ async def check_oauth_client(
     if error == "invalid_grant":
         oauth = definition.auth.oauth
         assert oauth is not None
+        accepted = f"{name} accepts this client ID and secret."
         return CheckResult(
             [
                 Check(
                     "client",
                     True,
-                    f"{name} accepts this client ID and secret."
-                    if "core" in oauth.redirect
-                    else f"{name} accepts this client ID and secret. It checks "
-                    "the redirect URLs only when someone connects, so the first "
-                    "connection confirms them.",
+                    accepted
+                    if oauth.unchecked is None
+                    else f"{accepted} {oauth.unchecked}",
                     None,
                 )
             ],

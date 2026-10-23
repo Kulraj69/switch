@@ -375,7 +375,8 @@ class TestDisconnect:
         adapter, _ = _adapter(vendor)
         secret = await _sign_in(adapter, vendor)
         with pytest.raises(
-            ConnectionNotRevocable, match="Remove Switch's access in your Example"
+            ConnectionNotRevocable,
+            match="so it still works. Remove Switch under Connected apps in Example.",
         ):
             await adapter.revoke_connection(secret)
         assert vendor.revoked == []
@@ -596,7 +597,7 @@ class TestThroughTheBroker:
             warning = await broker.disconnect(session, owner.id, "example")
 
         assert warning is not None
-        assert "cannot revoke it" in warning
+        assert "cannot revoke it, so it still works" in warning
         assert "could not revoke" not in warning
         assert not [r for r in caplog.records if r.levelname == "ERROR"]
         assert vendor.revoked == []

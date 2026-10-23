@@ -40,7 +40,8 @@ auth:
     # authorization_params: { access_type: offline }   # also sent with every
     #   authorization; only keys Core does not set itself (access_type,
     #   include_granted_scopes)
-    revocation_discovered: true   # or revocation_url: https://…
+    revocation_discovered: true   # or revocation_url: https://…; with neither,
+                                  # remove_access: where people remove Switch
   identity:                   # GET with the token; dotted paths in its JSON
     url: https://api.atlassian.com/me
     account_id: account_id
@@ -496,8 +497,12 @@ is in [`docs/old/airtable-setup.md`](../old/airtable-setup.md).
   and asks again. whoami (`api.airtable.com/v0/meta/whoami`) accepts the MCP
   server's token; it returns no email without a scope the server does not
   offer, so a connection is named by its account id.
-- Airtable has no revocation endpoint. Disconnecting tells the person to
-  remove Switch under Integrations in their Airtable account menu.
+- Airtable has no revocation endpoint. Each sign-in is its own grant there,
+  and the integration reaches every base any of a person's grants shared, so
+  a sign-in Switch drops (a disconnect, a reconnect, one a switched-off
+  workspace refuses) still works and widens the next. Its entry's
+  `remove_access`, which an OAuth entry without revocation must have, tells
+  the person to revoke it under Integrations, Third-party integrations.
 - `list_secrets` is account-wide and returns each automation secret's id, name
   and creation time, never its value.
 - On Enterprise plans an admin may allowlist third-party clients by client id:

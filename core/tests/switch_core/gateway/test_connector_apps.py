@@ -733,7 +733,7 @@ class TestLoopbackClients:
         assert saved.json()["source"] == "saved"
         assert checked.status_code == 200, checked.text
         assert checked.json()["ok"] is True
-        assert "the first connection confirms them" in json.dumps(checked.json())
+        assert "only you can connect" in json.dumps(checked.json())
         # The check is a code exchange on a redirect the integration lists.
         assert [
             form["redirect_uri"] for form in local_world.airtable.token_requests

@@ -1569,10 +1569,10 @@ class ServiceBroker:
                 )
             async with asyncio.timeout(VENDOR_CALL_SECONDS):
                 await adapter.revoke_connection(secret)
-        except ConnectionNotRevocable:
+        except ConnectionNotRevocable as error:
             # The vendor offers no revocation: nothing failed, but the
             # sign-in lives on until the person removes it there.
-            return unrevoked
+            return str(error)
         except Exception as error:
             logger.error(
                 "%s unkept sign-in revocation failed: error_type=%s",

@@ -186,8 +186,14 @@ def test_the_shipped_airtable_entry_signs_in_as_the_spike_found_it_must():
     assert oauth.client_settings == "AIRTABLE"
     # Airtable matches a loopback redirect's port, so the ports are fixed.
     assert oauth.loopback_ports == [39231, 39232, 39233, 39234, 39235]
-    # Airtable has no revocation endpoint.
+    # Airtable has no revocation endpoint, so people remove Switch there, and
+    # are told a sign-in left behind widens the next.
     assert (oauth.revocation_url, oauth.revocation_discovered) == (None, False)
+    assert oauth.remove_access is not None
+    assert "Third-party integrations" in oauth.remove_access
+    assert "reaches the bases it shared" in oauth.remove_access
+    # Nothing Switch asks Airtable shows whether the integration is published.
+    assert oauth.unchecked is not None and "published" in oauth.unchecked
     assert definition.auth.refresh == "rotating"
     assert definition.token is not None
     assert (definition.token.kind, definition.token.max_lifetime) == (
@@ -449,6 +455,7 @@ auth:
   oauth:
     registration: dynamic
     redirect: [loopback, core]
+    remove_access: Remove Switch under Connected apps in Example.
   identity:
     url: https://api.example.test/me
     account_id: account.id
@@ -526,7 +533,8 @@ def test_loads_a_static_client_with_its_endpoints(catalog_copy):
     ("old", "new", "message"),
     [
         (
-            "  oauth:\n    registration: dynamic\n    redirect: [loopback, core]\n",
+            "  oauth:\n    registration: dynamic\n    redirect: [loopback, core]\n"
+            "    remove_access: Remove Switch under Connected apps in Example.\n",
             "",
             "an oauth entry needs auth.oauth",
         ),
@@ -631,6 +639,16 @@ def test_loads_a_static_client_with_its_endpoints(catalog_copy):
             "    redirect: [loopback, core]\n    revocation_discovered: true\n"
             "    revocation_url: https://auth.example.test/revoke\n",
             "revocation_discovered",
+        ),
+        (
+            "    remove_access: Remove Switch under Connected apps in Example.\n",
+            "",
+            "remove_access",
+        ),
+        (
+            "    redirect: [loopback, core]\n",
+            "    redirect: [loopback, core]\n    unchecked: Publish it.\n",
+            "unchecked is for a static client",
         ),
     ],
 )

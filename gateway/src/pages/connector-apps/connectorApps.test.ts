@@ -7,6 +7,7 @@ import {
   cardState,
   changeBlocked,
   configuredSentence,
+  confirmBeforeCheck,
   menuActions,
   menuLabel,
   missingPublicUrl,
@@ -312,6 +313,11 @@ describe("an app that sends people back to Switch Console", () => {
     const texts = steps.map((s) => s.text);
     expect(texts).toContain("Under Scopes, tick exactly these: data.records:read, data.records:write.");
     expect(texts.at(-1)).toMatch(/support email, privacy policy URL and terms of service URL/);
+  });
+
+  it("asks the operator to confirm what no check can see: that the integration is published", () => {
+    expect(confirmBeforeCheck(AIRTABLE)).toMatch(/support email, privacy policy URL and terms of service URL/);
+    expect(confirmBeforeCheck(NONE)).toBeNull();
   });
 
   it("can be set up on a server with no public URL, and doesn't raise the banner", () => {

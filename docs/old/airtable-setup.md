@@ -49,7 +49,8 @@ In Airtable, open **Builder Hub**, then **OAuth integrations**, then
    attempts to create or change tables and fields.
 4. **Generate a client secret**.
 5. **Support information**: fill in the support email, privacy policy URL and
-   terms of service URL, so that people other than the owner can authorize it.
+   terms of service URL. Until all three are set, only the integration's
+   owner can connect, and nothing Switch asks Airtable shows it.
 
 ## Give Switch the client
 
@@ -58,11 +59,12 @@ Server, or in the Switch dashboard open **Connectors** beside Users. Both are
 shown to the server's operator only, and only with the server's
 `service_connections` flag on. Choose **Set up Airtable**. The dialog walks
 the steps above, with the five redirect URLs to copy and the scopes to tick;
-paste the integration's **Client ID** and **Client secret**, and choose
-**Check and save**. Switch first asks Airtable about the client, and saves it
-only if Airtable accepts the client ID and secret together. Airtable compares
-the redirect URLs only when someone connects, so a missing one shows at the
-first connection, not here. The secret is stored encrypted, like every other
+paste the integration's **Client ID** and **Client secret**, tick that its
+support details are set, and choose **Check and save**. Switch first asks
+Airtable about the client, and saves it only if Airtable accepts the client ID
+and secret together. That cannot show the redirect URLs or whether the
+integration is published, so have someone other than its owner connect once
+to confirm both. The secret is stored encrypted, like every other
 stored credential (see [key rotation](key-rotation.md)), and is in use at
 once: nobody needs to restart anything.
 
@@ -123,9 +125,14 @@ Integrations & development.
    turns Airtable on. The agent acts as its owner: records and comments it
    creates, changes or deletes show in Airtable as done by them.
 
-Airtable has no way for Switch to revoke a sign-in. Disconnecting in Switch
-forgets it and says so; to end it at Airtable too, the person removes the
-integration under Integrations in their Airtable account menu.
+Airtable has no way for Switch to revoke a sign-in, and each sign-in is its
+own grant there, listed separately under Integrations, Third-party
+integrations, in the person's Airtable account menu. The integration reaches
+every base any of those grants shared. So when someone disconnects, or
+connects again, the sign-in Switch stops using still works, and its bases
+still count toward any Airtable connection they make: one that once shared
+everything keeps a later one, sharing a single base, reaching every base.
+Switch says so each time, and the person removes the old grant in Airtable.
 
 ## Switching it off
 
@@ -145,3 +152,6 @@ next token requests:
   grant; it cannot be narrowed or revoked per agent. Turning an agent off stops
   its sessions within an hour; disconnecting stops every agent at once.
 - Development bases refuse every call from Airtable's MCP server.
+- Reconnecting never narrows what a connection reaches: the bases of every
+  grant the person has not removed in Airtable still count (see "What people
+  do").

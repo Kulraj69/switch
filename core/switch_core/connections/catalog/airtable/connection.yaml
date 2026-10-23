@@ -21,8 +21,19 @@ auth:
     # Airtable matches a loopback redirect exactly, port included.
     redirect: [loopback]
     loopback_ports: [39231, 39232, 39233, 39234, 39235]
-    # Airtable has no revocation endpoint: a disconnect cannot revoke the
-    # sign-in there.
+    # Airtable compares the redirect only with a real code, and nothing short
+    # of someone else's sign-in shows whether the integration is published.
+    unchecked: >-
+      Switch can't see its redirect URLs or whether it is published. Until its
+      support email, privacy policy and terms of service are set, only you can
+      connect. Have someone else connect once to confirm.
+    # Airtable has no revocation endpoint, so a sign-in Switch drops lives on
+    # there. Each sign-in is its own grant, and Airtable gives the integration
+    # every base any of them shared: one left behind widens the next.
+    remove_access: >-
+      Remove it in Airtable under Integrations, Third-party integrations, in
+      your account menu, where each sign-in is listed separately. Until then,
+      any Airtable connection you make reaches the bases it shared too.
   identity:
     url: https://api.airtable.com/v0/meta/whoami
     account_id: id
