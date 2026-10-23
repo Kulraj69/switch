@@ -324,6 +324,13 @@ export function ConnectorAppSetupDialog({
                       <ExternalLink className="size-3" />
                     </button>
                   )}
+                  {instruction.items.length > 0 && (
+                    <ul className="mt-1 list-disc space-y-0.5 pl-5 font-mono text-xs">
+                      {instruction.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  )}
                   {instruction.copy && <Copyable value={instruction.copy} />}
                 </li>
               ))}

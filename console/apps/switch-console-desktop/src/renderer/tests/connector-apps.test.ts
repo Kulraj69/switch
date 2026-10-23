@@ -373,9 +373,10 @@ describe('an app that sends people back to Switch Console', () => {
     expect(steps.map((s) => s.copy).filter((c) => c !== null)).toEqual(AIRTABLE_REDIRECTS);
     expect(new Set(steps.map((s) => s.text)).size).toBe(steps.length);
     const texts = steps.map((s) => s.text);
-    expect(texts).toContain(
-      'Under Scopes, tick exactly these: data.records:read, data.records:write.'
-    );
+    expect(steps.find((s) => s.text === 'Under Scopes, tick exactly these:')?.items).toEqual([
+      'data.records:read',
+      'data.records:write',
+    ]);
     expect(texts.at(-1)).toMatch(/support email, privacy policy URL and terms of service URL/);
   });
 

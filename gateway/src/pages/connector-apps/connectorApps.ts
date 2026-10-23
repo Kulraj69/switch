@@ -36,6 +36,8 @@ export interface Instruction {
   copy: string | null;
   /** The vendor's page for this step, where it has one of its own. */
   link: { label: string; href: string } | null;
+  /** Values to pick at the vendor, one per line. */
+  items: string[];
 }
 
 export interface SecretField {
@@ -245,13 +247,14 @@ const GOOGLE_CLOUD = "https://console.cloud.google.com";
 
 /** One step per address: a vendor that matches the port needs every one. */
 function redirectSteps(intro: string, redirects: string[]): Instruction[] {
-  if (redirects.length <= 1) return [{ text: intro, copy: redirects[0] ?? null, link: null }];
+  if (redirects.length <= 1) return [{ text: intro, copy: redirects[0] ?? null, link: null, items: [] }];
   return [
-    { text: intro, copy: null, link: null },
+    { text: intro, copy: null, link: null, items: [] },
     ...redirects.map((redirect, index) => ({
       text: `Redirect URL ${index + 1} of ${redirects.length}:`,
       copy: redirect,
       link: null,
+      items: [],
     })),
   ];
 }
@@ -269,29 +272,34 @@ export function setupInstructions(
         text: "In GitHub, create a new GitHub App: Settings, Developer settings, GitHub Apps. For an App owned by an organization, start from the organization's settings instead.",
         copy: null,
         link: { label: "Open GitHub", href: "https://github.com/settings/apps/new" },
+        items: [],
       },
-      { text: "Set the Homepage URL to Switch's public URL:", copy: publicUrl, link: null },
-      { text: "Set the Callback URL to:", copy: redirect, link: null },
-      { text: "Keep Expire user authorization tokens turned on.", copy: null, link: null },
+      { text: "Set the Homepage URL to Switch's public URL:", copy: publicUrl, link: null, items: [] },
+      { text: "Set the Callback URL to:", copy: redirect, link: null, items: [] },
+      { text: "Keep Expire user authorization tokens turned on.", copy: null, link: null, items: [] },
       {
         text: "Under Webhook, untick Active. Switch doesn't use GitHub's webhooks, and GitHub asks for a webhook URL while it is ticked.",
         copy: null,
         link: null,
+        items: [],
       },
       {
         text: "Under Repository permissions, set Contents and Pull requests to Read and write.",
         copy: null,
         link: null,
+        items: [],
       },
       {
         text: "Under Where can this GitHub App be installed, choose Any account, so people can install it on their own accounts and organizations. Choose Only on this account only if every member's repositories are in your own organization.",
         copy: null,
         link: null,
+        items: [],
       },
       {
         text: "Create the GitHub App. On its page, generate a client secret, then a private key, and keep the downloaded .pem file.",
         copy: null,
         link: null,
+        items: [],
       },
     ];
   if (app.slug === AIRTABLE)
@@ -300,30 +308,35 @@ export function setupInstructions(
         text: "In Airtable's Builder Hub, under OAuth integrations, register a new OAuth integration. Use an Airtable account your organization owns: whoever owns the integration can delete it, and that stops every connection.",
         copy: null,
         link: { label: "Open Builder Hub", href: "https://airtable.com/create/oauth" },
+        items: [],
       },
       {
         text: "Name it as people should see it on Airtable's consent page, for example Switch.",
         copy: null,
         link: null,
+        items: [],
       },
       ...redirectSteps(
         "Under OAuth redirect URLs, add all of these. Airtable matches the port, and Switch Console uses whichever one is free:",
         app.redirect_uris,
       ),
       {
-        text: `Under Scopes, tick exactly these: ${app.scopes.join(", ")}.`,
+        text: "Under Scopes, tick exactly these:",
         copy: null,
         link: null,
+        items: app.scopes,
       },
       {
         text: "Register the integration. On its page, generate a client secret, and copy the Client ID and the secret.",
         copy: null,
         link: null,
+        items: [],
       },
       {
         text: "Fill in its support email, privacy policy URL and terms of service URL. Until all three are set, Airtable lets only the owner connect.",
         copy: null,
         link: null,
+        items: [],
       },
     ];
   if (app.slug === GOOGLE)
@@ -332,31 +345,37 @@ export function setupInstructions(
         text: "In Google Cloud, create a project for Switch, or pick an existing one.",
         copy: null,
         link: { label: "Create a project", href: `${GOOGLE_CLOUD}/projectcreate` },
+        items: [],
       },
       {
         text: "In Google Auth Platform, under Branding, enter an app name people will recognise and a support email.",
         copy: null,
         link: { label: "Open Branding", href: `${GOOGLE_CLOUD}/auth/branding` },
+        items: [],
       },
       {
         text: audienceText(audience),
         copy: null,
         link: { label: "Open Audience", href: `${GOOGLE_CLOUD}/auth/audience` },
+        items: [],
       },
       {
         text: "Under Clients, create a client of type Web application.",
         copy: null,
         link: { label: "Open Clients", href: `${GOOGLE_CLOUD}/auth/clients` },
+        items: [],
       },
       {
         text: "Add this under Authorized redirect URIs, create the client, and copy its Client ID and Client secret:",
         copy: redirect,
         link: null,
+        items: [],
       },
       {
         text: "Enable the Google Drive, Docs, Sheets, Slides and Calendar APIs for the project.",
         copy: null,
         link: { label: "Open the API Library", href: `${GOOGLE_CLOUD}/apis/library` },
+        items: [],
       },
     ];
   return redirectSteps(

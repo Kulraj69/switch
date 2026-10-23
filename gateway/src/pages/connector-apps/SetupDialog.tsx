@@ -264,6 +264,20 @@ export default function SetupDialog({
                         </>
                       )}
                     </Typography>
+                    {instruction.items.length > 0 && (
+                      <Box component="ul" sx={{ pl: 2.5, my: 0.5 }}>
+                        {instruction.items.map((item) => (
+                          <Typography
+                            component="li"
+                            key={item}
+                            variant="body2"
+                            sx={{ fontFamily: "monospace" }}
+                          >
+                            {item}
+                          </Typography>
+                        ))}
+                      </Box>
+                    )}
                     {instruction.copy && <Copyable value={instruction.copy} />}
                   </Box>
                 ))}
