@@ -56,6 +56,14 @@ version of their own to them without also giving them a release of their own.
   from `switchCore.followTheConversation.windowSeconds` (default 300).
 
 #### Fixed
+- **The Mattermost bridge no longer leaves a working bot token behind on every
+  start.** Each start, or each takeover by another process, created a new
+  access token for every Switch bot and never revoked the old ones, so they
+  piled up and stayed valid indefinitely. The bridge now revokes its tokens
+  when it stops and an agent's token when the agent is removed, and on start
+  revokes every earlier Switch token on each bot, which also clears those left
+  by a crash or by earlier versions. Two Switch servers sharing one Mattermost
+  revoke each other's tokens, so give each its own Mattermost (#1005).
 - **A request card posted in a thread now mentions the person who can answer
   it.** Approval and question cards go into the thread of the turn that raised
   them, and on Slack they used to mention nobody there, so an owner who was not
@@ -1854,6 +1862,14 @@ version of their own to them without also giving them a release of their own.
   starting Docker meanwhile left the setup skipping Mattermost until you went
   back. It now checks again every few seconds, and when Console regains focus,
   while Docker isn't answering.
+- **Checking whether OpenCode is signed in no longer leaves OpenCode servers
+  running.** When a check took too long and was stopped, the `opencode serve`
+  it started kept running and its `switch-opencode-*` temporary folder stayed,
+  one more every ten minutes for as long as Console was open. A stopped check
+  now shuts its server down and removes the folder first. Servers already left
+  behind are not cleaned up: end them with
+  `pkill -f "opencode serve --hostname=127.0.0.1"` while no OpenCode agent is
+  running, and delete the folders (#944).
 
 ### [0.40.1] - 2026-10-21
 

@@ -9,6 +9,13 @@ import { prepareOpencodeHome } from './home';
 
 const READY_PREFIX = 'opencode server listening';
 
+/**
+ * Servers started and not yet stopped. OpenCode does not exit with its
+ * parent, so a process ended by a signal stops these itself
+ * (`stopAllOpencodeServers`) or leaves them running.
+ */
+const running = new Map<ChildProcess, string>();
+
 export interface OpencodeServerHandle {
   url: string;
   /** HTTP Basic, username `opencode`, password from `OPENCODE_SERVER_PASSWORD`. */
@@ -74,6 +81,7 @@ export async function startOpencodeServer(input: StartServerInput): Promise<Open
       stdio: ['ignore', 'pipe', 'pipe'],
     }
   );
+  running.set(child, configHome);
 
   try {
     const url = await new Promise<string>((resolve, reject) => {
@@ -140,27 +148,40 @@ export async function stopOpencodeServer(
   server: Pick<OpencodeServerHandle, 'process' | 'configHome'>
 ): Promise<void> {
   const child = server.process;
-  if (child.pid && child.exitCode === null && child.signalCode === null) {
-    await new Promise<void>((resolve, reject) => {
-      const kill = setTimeout(() => stopProvider(child, 'SIGKILL'), 2000);
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error('OpenCode process did not exit after termination.'));
-      }, 5000);
-      const cleanup = () => {
-        clearTimeout(kill);
-        clearTimeout(timeout);
-        child.removeListener('exit', exited);
-      };
-      const exited = () => {
-        cleanup();
-        resolve();
-      };
-      child.once('exit', exited);
-      stopProvider(child, 'SIGTERM');
-    });
+  try {
+    if (child.pid && child.exitCode === null && child.signalCode === null)
+      await new Promise<void>((resolve, reject) => {
+        const kill = setTimeout(() => stopProvider(child, 'SIGKILL'), 2000);
+        const timeout = setTimeout(() => {
+          cleanup();
+          reject(new Error('OpenCode process did not exit after termination.'));
+        }, 5000);
+        const cleanup = () => {
+          clearTimeout(kill);
+          clearTimeout(timeout);
+          child.removeListener('exit', exited);
+        };
+        const exited = () => {
+          cleanup();
+          resolve();
+        };
+        child.once('exit', exited);
+        stopProvider(child, 'SIGTERM');
+      });
+  } finally {
+    running.delete(child);
+    await rm(server.configHome, { recursive: true, force: true });
   }
-  await rm(server.configHome, { recursive: true, force: true });
+}
+
+/** Stops every OpenCode server this process started and has not stopped yet. */
+export async function stopAllOpencodeServers(): Promise<void> {
+  const results = await Promise.allSettled(
+    [...running].map(([process, configHome]) => stopOpencodeServer({ process, configHome }))
+  );
+  for (const result of results)
+    if (result.status === 'rejected')
+      console.error(`Could not stop an OpenCode server: ${String(result.reason)}`);
 }
 
 async function waitForHealth(url: string, authorization: string, timeoutMs: number): Promise<void> {

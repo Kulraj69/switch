@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
+import { stopAllOpencodeServers } from '../opencode/server';
 import { openSwitchStream, runAgentHost } from './agent-host';
 import { AttachmentTransfers } from './attachment-transfers';
 import { type ControlContext, ensureSessions, serveControl } from './control';
@@ -34,9 +35,23 @@ import { bundleIdentity, recordWatcherHealth } from './watcher-health-file';
 import { WatcherControl } from './watcher-tools';
 
 const [root, configPath, mode] = process.argv.slice(2);
+
+/**
+ * A one-shot check's caller ends it with a signal when it gives up waiting,
+ * and Node exits on one without unwinding, so the OpenCode server and config
+ * home the check started would outlive it. Stop them, then die of the signal.
+ */
+function stopOpencodeServersOnSignal(): void {
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
+    process.once(signal, () => {
+      void stopAllOpencodeServers().finally(() => process.kill(process.pid, signal));
+    });
+}
+
 async function main(): Promise<void> {
   if (!root || !configPath)
     throw new Error('Shared SDK host requires a state directory and configuration file.');
+  if (root === '--models' || root === '--probe') stopOpencodeServersOnSignal();
   if (root === '--models') {
     const provider = sharedConfigSchema.shape.start.shape.provider.parse(configPath);
     const adapter = adapterFor(provider, process.argv[5], '', []);
