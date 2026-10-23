@@ -147,7 +147,7 @@ is the name; keep it a plain identifier.
 | `bridge` | The display name of a messaging app set up on the server. | The server checks it exists. |
 | `room` | The name of a room on the server. | The server checks it exists. |
 | `user` | A username on the room's messaging app. | The server looks it up on the app. |
-| `provider` | A coding agent id: `claude`, `codex` or `opencode`. | Read when the agents are created; never in the room document. |
+| `provider` | A coding agent id: `claude`, `codex`, `opencode`, `antigravity` or `cursor`. | Read when the agents are created; never in the room document. |
 | `location` | Where an agent runs: `local`, or an SSH host name the Console knows. | Switch Console; never in the room document. |
 | `machine` | One of the deployer's machines on the server, by name or id. | Read when the agents are created; never in the room document. |
 | `directory` | An agent's working directory, on the machine it runs on. | Read when the agents are created; never in the room document. |
@@ -267,7 +267,7 @@ agent:
   icon_url:       https URL
   description:    text
   instructions:   text
-  provider:       claude | codex | opencode | "{param}"
+  provider:       claude | codex | opencode | antigravity | cursor | "{param}"
   machine:        machine name or id | "{param}"
   location:       local | ssh host | "{param}"
   directory:      path | "{param}"
@@ -447,6 +447,17 @@ The same shape `POST /rooms/from-yaml` accepts and `GET /rooms/{id}/yaml`
 exports, so an exported room is a valid template once you add `params:`.
 `examples/room-templates/red-blue-workroom.template.yaml` documents every
 field in place.
+
+`roles:` are hats the room's agents can assume, each
+`{name, instructions, exclusive}`; an `exclusive: true` role (the default is
+`false`) has one holder at a time. `references:` attach outside material:
+`{id: ...}` or `{name: ...}` attaches a reference that exists, and one that
+is missing, ambiguous or not the deployer's to read stops the run; an entry
+with `type`, `name`, `description`, `instructions` and `value: {urls: [...]}`
+creates a new one (private unless `read_visibility` / `write_visibility` say
+otherwise). `docs:` are documents created in the room, each
+`{name, description, instructions, content}`. An exported room writes roles
+and docs in full and references by `id`.
 
 `agents:` names agents that exist on the server, plus the ones this
 document creates by the text written as their `name`. `users:` names people
