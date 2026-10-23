@@ -345,6 +345,7 @@ def _checks_body(result: CheckResult) -> list[dict[str, Any]]:
             "ok": check.ok,
             "message": check.message,
             "field": check.field,
+            "note": check.note,
         }
         for check in result.checks
     ]

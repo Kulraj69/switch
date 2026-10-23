@@ -83,6 +83,8 @@ export const connectorAppCheckSchema = z.object({
   ok: z.boolean(),
   message: z.string(),
   field: connectorAppFieldSchema.nullable(),
+  /** What the check could not see, for the operator to confirm themselves. */
+  note: z.string().nullable().default(null),
 });
 export type ConnectorAppCheck = z.infer<typeof connectorAppCheckSchema>;
 

@@ -208,6 +208,32 @@ describe("ConnectorAppsPage", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
   });
 
+  it("shows what a passing check could not see as a note", async () => {
+    serve(listOf(app()), {
+      "POST /gateway/connector-apps/google-workspace/check": [
+        200,
+        {
+          ok: true,
+          checks: [
+            {
+              name: "client",
+              ok: true,
+              message: "Google knows the client.",
+              field: null,
+              note: "Have someone else connect once.",
+            },
+          ],
+        },
+      ],
+    });
+    render(<ConnectorAppsPage />);
+    await screen.findByTestId("connector-app-google-workspace");
+    fireEvent.click(card("google-workspace").getByRole("button", { name: "Check it works" }));
+    expect(await card("google-workspace").findByText("Google knows the client.")).toBeTruthy();
+    expect(card("google-workspace").getByText("Note:").tagName).toBe("STRONG");
+    expect(card("google-workspace").getByText(/Have someone else connect once\./)).toBeTruthy();
+  });
+
   it("reads GitHub's private key from its file and never shows it", async () => {
     const calls = serve(
       listOf({ ...GITHUB, ...NONE_GOOGLE, slug: "github", name: "GitHub", kind: "github_app" }),

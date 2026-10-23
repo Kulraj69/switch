@@ -172,7 +172,14 @@ export function ConnectorAppProfile({
               ) : (
                 <CircleX aria-label="Failed" className="mt-0.5 size-4 shrink-0 text-destructive" />
               )}
-              {c.message}
+              <span className="flex flex-col gap-0.5">
+                <span>{c.message}</span>
+                {c.note && (
+                  <span className="text-foreground-muted">
+                    <strong className="font-semibold text-foreground">Note:</strong> {c.note}
+                  </span>
+                )}
+              </span>
             </li>
           ))}
         </ul>

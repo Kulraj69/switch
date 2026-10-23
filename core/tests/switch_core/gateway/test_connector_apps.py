@@ -726,7 +726,9 @@ class TestAirtable:
         assert saved.json()["source"] == "saved"
         assert checked.status_code == 200, checked.text
         assert checked.json()["ok"] is True
-        assert "only you can connect" in json.dumps(checked.json())
+        [check] = checked.json()["checks"]
+        assert check["message"] == "Airtable accepts this client ID and secret."
+        assert check["note"].startswith("Switch can't check the redirect URL")
         # The check is a code exchange on the redirect the integration lists.
         assert [form["redirect_uri"] for form in world.airtable.token_requests] == [
             AIRTABLE_CALLBACK

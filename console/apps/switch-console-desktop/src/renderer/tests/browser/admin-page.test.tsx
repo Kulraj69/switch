@@ -387,8 +387,20 @@ it("opens an app's profile from its tile, and a failed check stays on the tile a
   switchServers.checkConnectorApp.mockResolvedValue({
     ok: false,
     checks: [
-      { name: 'client', ok: true, message: 'Google knows the client.', field: null },
-      { name: 'secret', ok: false, message: 'Google refused the secret.', field: 'client_secret' },
+      {
+        name: 'client',
+        ok: true,
+        message: 'Google knows the client.',
+        field: null,
+        note: 'Have someone else connect once.',
+      },
+      {
+        name: 'secret',
+        ok: false,
+        message: 'Google refused the secret.',
+        field: 'client_secret',
+        note: null,
+      },
     ],
   });
   navigation.navigate('admin', { section: 'apps' });
@@ -413,9 +425,10 @@ it("opens an app's profile from its tile, and a failed check stays on the tile a
 
   await act(async () => button(/^Check it works$/, page)!.click());
   await vi.waitFor(() => expect(page.textContent).toContain('Google refused the secret.'));
-  expect(page.querySelector('[aria-label="What the vendor said"]')!.textContent).toContain(
-    'Google knows the client.'
-  );
+  const said = page.querySelector('[aria-label="What the vendor said"]')!;
+  expect(said.textContent).toContain('Google knows the client.');
+  expect(said.querySelector('strong')?.textContent).toBe('Note:');
+  expect(said.textContent).toContain('Note: Have someone else connect once.');
   // The fix is now the obvious button.
   expect(button(/^Update secret$/, page)).toBeDefined();
 

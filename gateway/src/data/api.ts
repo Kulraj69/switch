@@ -2388,6 +2388,8 @@ export interface ConnectorAppCheck {
   ok: boolean;
   message: string;
   field: ConnectorAppField | null;
+  /** What the check could not see, for the operator to confirm themselves. */
+  note: string | null;
 }
 
 export interface SaveConnectorAppInput {

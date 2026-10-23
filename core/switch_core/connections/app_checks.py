@@ -60,6 +60,8 @@ class Check:
     message: str
     # The value the operator should look at again when the check fails.
     field: Field | None
+    # What the check could not see, for the operator to confirm themselves.
+    note: str | None
 
 
 @dataclass(frozen=True)
@@ -105,7 +107,8 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
         )
     except ValueError as unusable:
         return CheckResult(
-            [Check("private_key", False, str(unusable), "private_key")], settings={}
+            [Check("private_key", False, str(unusable), "private_key", None)],
+            settings={},
         )
     assertion = signer.assertion()
     app = await _send(
@@ -133,6 +136,7 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
                     "Copy the Client ID again, or generate a private key in the "
                     "App's settings.",
                     "private_key",
+                    None,
                 )
             ],
             settings={},
@@ -146,6 +150,7 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
                     "This private key belongs to a GitHub App with another client "
                     "ID. Copy the Client ID from that App's settings.",
                     "client_id",
+                    None,
                 )
             ],
             settings={},
@@ -155,6 +160,7 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
             "private_key",
             True,
             f"GitHub accepts this private key for the App {slug}.",
+            None,
             None,
         )
     ]
@@ -175,7 +181,9 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
     error = _body(exchanged).get("error")
     if error == "bad_verification_code":
         checks.append(
-            Check("client_secret", True, "GitHub accepts this client secret.", None)
+            Check(
+                "client_secret", True, "GitHub accepts this client secret.", None, None
+            )
         )
     elif error == "incorrect_client_credentials":
         checks.append(
@@ -185,6 +193,7 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
                 "GitHub doesn't accept this client secret for this client ID. "
                 "Generate a new one in the App's settings.",
                 "client_secret",
+                None,
             )
         )
     else:
@@ -195,6 +204,7 @@ async def check_github_app(http: httpx.AsyncClient, values: AppValues) -> CheckR
                 "GitHub gave an answer Switch doesn't recognise when checking the "
                 f"client secret ({error or f'HTTP {exchanged.status_code}'}).",
                 "client_secret",
+                None,
             )
         )
     return CheckResult(checks, settings={"slug": slug})
@@ -235,16 +245,14 @@ async def check_oauth_client(
     if error == "invalid_grant":
         oauth = definition.auth.oauth
         assert oauth is not None
-        accepted = f"{name} accepts this client ID and secret."
         return CheckResult(
             [
                 Check(
                     "client",
                     True,
-                    accepted
-                    if oauth.unchecked is None
-                    else f"{accepted} {oauth.unchecked}",
+                    f"{name} accepts this client ID and secret.",
                     None,
+                    oauth.unchecked,
                 )
             ],
             settings={},
@@ -257,6 +265,7 @@ async def check_oauth_client(
                     False,
                     f"{name} doesn't have Switch's redirect URI for this client. "
                     f"Add {redirect_uri} to its authorized redirect URIs.",
+                    None,
                     None,
                 )
             ],
@@ -271,6 +280,7 @@ async def check_oauth_client(
                     f"{name} doesn't recognise this client ID and secret together. "
                     "Copy both again from where you created the client.",
                     "client_secret",
+                    None,
                 )
             ],
             settings={},
@@ -282,6 +292,7 @@ async def check_oauth_client(
                 False,
                 f"{name} gave an answer Switch doesn't recognise "
                 f"({error or f'HTTP {response.status_code}'}).",
+                None,
                 None,
             )
         ],

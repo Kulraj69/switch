@@ -264,6 +264,11 @@ export default function ConnectorAppCard({
             {checks.map((c) => (
               <Alert key={c.name} severity={c.ok ? "success" : "error"} variant="outlined">
                 {c.message}
+                {c.note && (
+                  <Typography variant="body2" sx={{ mt: 0.5 }}>
+                    <strong>Note:</strong> {c.note}
+                  </Typography>
+                )}
               </Alert>
             ))}
           </Stack>
