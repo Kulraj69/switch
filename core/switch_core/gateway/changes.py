@@ -1,7 +1,8 @@
 """The signed-in user's change notices, pushed over one WebSocket.
 
 Console keeps this open per server it is signed in to, and reads a list again
-when a notice names its kind, instead of reading it on a timer. The frames are
+when a notice names its kind, instead of polling it every few seconds (it
+still reads it every few minutes, for notices that were never sent). The frames are
 JSON `{"event", "data"}`, as on the agent and controller sockets:
 
 - `hello` once, on opening: `protocol`, the `kinds` this server sends notices

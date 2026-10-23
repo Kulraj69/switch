@@ -26,7 +26,10 @@ or a receiver's listening connection was down) is not re-sent: there is
 nothing in the database to compare a socket against. Instead, when a
 process's listening connection comes back, every socket it holds is told that
 everything of every kind changed, so its Console reads it all again, as it
-would on reconnecting.
+would on reconnecting. That does not cover a notice that was never sent: the
+writer pod died after its commit, or an older pod without this module made the
+change during a rolling deploy. For those, Console also reads its lists again
+every few minutes while the socket is up, which bounds how stale one can get.
 """
 
 from __future__ import annotations

@@ -221,4 +221,28 @@ describe('user changes', () => {
     watchdog.fn();
     expect(socket.closedWith).toBe(4000);
   });
+
+  it('opens a new socket after the watchdog fires, even if the old one never says closed', async () => {
+    const { service, emitted, timers } = setup();
+    service.watch('s1');
+    await tick();
+    const socket = FakeSocket.opened[0];
+    socket.fire('open');
+    socket.frame('hello', { kinds: ['machine'], ping_interval_s: 10 });
+    timers.at(-1)!.fn();
+    // No `close` event: the connection went silent.
+    expect(service.isLive('s1')).toBe(false);
+    expect(emitted.at(-1)).toMatchObject({ serverId: 's1', type: 'down' });
+    const retry = timers.at(-1)!;
+    expect(retry.ms).toBeLessThanOrEqual(5_000);
+    retry.fn();
+    await tick();
+    expect(FakeSocket.opened).toHaveLength(2);
+    // The old socket's close, if it ever comes, does not take the new one down.
+    FakeSocket.opened[1].fire('open');
+    FakeSocket.opened[1].frame('hello', { kinds: ['machine'], ping_interval_s: 10 });
+    socket.fire('close', { code: 1006 });
+    expect(service.isLive('s1')).toBe(true);
+    expect(FakeSocket.opened).toHaveLength(2);
+  });
 });

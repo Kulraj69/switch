@@ -126,19 +126,27 @@ class ServerSocket {
     });
     socket.addEventListener('message', (event) => this.onMessage(socket, event.data));
     socket.addEventListener('close', (event) => {
+      // A socket the watchdog already gave up on has been replaced or is
+      // waiting for its retry: its late close changes nothing.
       if (this.socket !== socket) return;
-      this.socket = null;
-      this.downSince ??= this.deps.now();
-      if (this.watchdog) this.deps.clearTimer(this.watchdog);
-      this.setDown();
       // A handshake that never opened, on a server that has never said hello,
       // is most likely a server without the socket. One that has said hello
       // is restarting or unreachable for now: keep trying at the usual pace.
-      this.schedule(
+      this.drop(
         opened || this.supported ? this.retryMs : UNSUPPORTED_RETRY_MS,
         `closed (${event.code})`
       );
     });
+  }
+
+  /** Forget the current socket, tell the lists to poll, and open another later. */
+  private drop(retryMs: number, why: string): void {
+    this.socket = null;
+    this.downSince ??= this.deps.now();
+    if (this.watchdog) this.deps.clearTimer(this.watchdog);
+    this.watchdog = null;
+    this.setDown();
+    this.schedule(retryMs, why);
   }
 
   private onMessage(socket: WebSocket, data: unknown): void {
@@ -183,14 +191,22 @@ class ServerSocket {
 
   private pingIntervalMs = 25_000;
 
-  /** Take the socket for dead when the server goes quiet for `MISSED_PINGS` pings. */
+  /**
+   * Take the socket for dead when the server goes quiet for `MISSED_PINGS`
+   * pings. `close()` only starts the closing handshake, and on a connection
+   * that went silent (a laptop that slept, a NAT that dropped it) the `close`
+   * event may never come, so the socket is dropped here rather than when it
+   * does: the lists go back to polling and a new socket is opened.
+   */
   private arm(socket: WebSocket, pingIntervalS?: number): void {
     if (pingIntervalS !== undefined) this.pingIntervalMs = pingIntervalS * 1000;
     if (this.watchdog) this.deps.clearTimer(this.watchdog);
-    this.watchdog = this.deps.setTimer(
-      () => socket.close(4000),
-      this.pingIntervalMs * MISSED_PINGS
-    );
+    this.watchdog = this.deps.setTimer(() => {
+      this.watchdog = null;
+      if (this.socket !== socket) return;
+      socket.close(4000);
+      this.drop(this.retryMs, 'heard no ping');
+    }, this.pingIntervalMs * MISSED_PINGS);
   }
 
   private setDown(): void {

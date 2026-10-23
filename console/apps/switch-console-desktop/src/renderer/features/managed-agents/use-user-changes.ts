@@ -1,9 +1,58 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { workspacesStore } from '@renderer/features/workspaces/workspaces-store';
 import { events, rpc } from '@renderer/lib/ipc';
 import { userChangesChannel } from '@shared/events/userChangesEvents';
 import { MANAGED_AGENTS_KEY } from './use-managed-agents-key';
+
+/**
+ * One listener per server and workspace in this window, however many
+ * components ask: every agent row reads the machines list through
+ * `useRunsOnThisComputer`, and a listener per row turned one notice into a
+ * read of the same lists per row. Each hook only follows whether the socket
+ * is live.
+ */
+type Feed = {
+  watchers: number;
+  live: boolean;
+  onLive: Set<(live: boolean) => void>;
+  stop: () => void;
+};
+
+const feeds = new Map<string, Feed>();
+
+function startFeed(queryClient: QueryClient, serverId: string, workspaceId: string | null): Feed {
+  const feed: Feed = { watchers: 0, live: false, onLive: new Set(), stop: () => {} };
+  const setLive = (live: boolean) => {
+    if (feed.live === live) return;
+    feed.live = live;
+    for (const notify of feed.onLive) notify(live);
+  };
+  const refresh = () =>
+    void queryClient.invalidateQueries({ queryKey: [MANAGED_AGENTS_KEY, serverId] });
+  let stopped = false;
+  const off = events.on(userChangesChannel, (event) => {
+    if (event.serverId !== serverId || event.workspaceId !== workspaceId) return;
+    if (event.type === 'live') {
+      setLive(true);
+      refresh();
+    } else if (event.type === 'down') {
+      setLive(false);
+    } else {
+      refresh();
+    }
+  });
+  void rpc.userChanges.watch(serverId, workspaceId).then((isLive) => {
+    if (!stopped && isLive) setLive(true);
+  });
+  feed.stop = () => {
+    stopped = true;
+    off();
+    setLive(false);
+    void rpc.userChanges.unwatch(serverId, workspaceId);
+  };
+  return feed;
+}
 
 /**
  * Keep the change socket for this server and its workspace in scope open
@@ -22,28 +71,24 @@ export function useUserChangesLive(serverId: string | null): boolean {
   const workspaceId = workspacesStore.idOnServerInScope(serverId);
   useEffect(() => {
     if (serverId === null) return;
-    let disposed = false;
-    const refresh = () =>
-      void queryClient.invalidateQueries({ queryKey: [MANAGED_AGENTS_KEY, serverId] });
-    const off = events.on(userChangesChannel, (event) => {
-      if (event.serverId !== serverId || event.workspaceId !== workspaceId) return;
-      if (event.type === 'live') {
-        setLive(true);
-        refresh();
-      } else if (event.type === 'down') {
-        setLive(false);
-      } else {
-        refresh();
-      }
-    });
-    void rpc.userChanges.watch(serverId, workspaceId).then((isLive) => {
-      if (!disposed && isLive) setLive(true);
-    });
+    const key = `${serverId}\u0000${workspaceId ?? ''}`;
+    let feed = feeds.get(key);
+    if (!feed) {
+      feed = startFeed(queryClient, serverId, workspaceId);
+      feeds.set(key, feed);
+    }
+    feed.watchers += 1;
+    feed.onLive.add(setLive);
+    setLive(feed.live);
+    const held = feed;
     return () => {
-      disposed = true;
-      off();
+      held.onLive.delete(setLive);
       setLive(false);
-      void rpc.userChanges.unwatch(serverId, workspaceId);
+      held.watchers -= 1;
+      if (held.watchers === 0) {
+        feeds.delete(key);
+        held.stop();
+      }
     };
   }, [queryClient, serverId, workspaceId]);
   return live;
