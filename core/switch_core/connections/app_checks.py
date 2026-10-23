@@ -8,10 +8,13 @@ request it must refuse, and reads which refusal it chose.
   slug; a code exchange with a made-up code then tells a wrong client secret
   (`incorrect_client_credentials`) from a right one (`bad_verification_code`).
 - **OAuth client**: a code exchange at the token endpoint with a made-up
-  code, sent to a redirect URI the client registers: Core's own callback, or
-  Switch Console's first loopback one. `invalid_grant` means the client
-  id and secret are right; `invalid_client` that they are not; and
-  `redirect_uri_mismatch` that the redirect URI is not registered.
+  code and PKCE verifier, the secret sent as a sign-in sends it, to a
+  redirect URI the client registers: Core's own callback, or Switch
+  Console's first loopback one. `invalid_grant` means the client id and
+  secret are right; `invalid_client` that they are not; and
+  `redirect_uri_mismatch` that the redirect URI is not registered. Airtable
+  compares redirect URIs only with a real code, so its are confirmed by the
+  first sign-in.
 
 What a check cannot prove (an App's permissions, a Google app's user type,
 which APIs are switched on) is left to the vendor's own pages.
@@ -29,6 +32,7 @@ from switch_core.connections.adapters.oauth import (
     OAuthAdapter,
     OAuthClientCredentials,
     StaticClient,
+    client_fields,
 )
 from switch_core.connections.app_credentials import AppSpec, AppValues
 from switch_core.connections.loader import ConnectionDefinition
@@ -38,6 +42,8 @@ GITHUB_APP_URL = "https://api.github.com/app"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 # Never a real code: the vendor is asked to refuse it.
 PLACEHOLDER_CODE = "switch-connector-app-check"
+# Airtable asks for a verifier before it looks at the client.
+PLACEHOLDER_VERIFIER = "switch-connector-app-check-" + "0" * 32
 
 Field = Literal["client_id", "client_secret", "private_key"]
 
@@ -207,6 +213,7 @@ async def check_oauth_client(
         ).endpoints()
     except ServiceAdapterError as refused:
         raise VendorUnreachableError(str(refused)) from None
+    identifying, headers = client_fields(endpoints, client)
     response = await _send(
         http,
         name,
@@ -216,21 +223,27 @@ async def check_oauth_client(
             data={
                 "grant_type": "authorization_code",
                 "code": PLACEHOLDER_CODE,
+                "code_verifier": PLACEHOLDER_VERIFIER,
                 "redirect_uri": redirect_uri,
-                "client_id": client.client_id,
-                "client_secret": values.secrets["client_secret"],
+                **identifying,
             },
-            headers={"Accept": "application/json"},
+            headers={"Accept": "application/json", **headers},
         ),
     )
     error = _body(response).get("error")
     if error == "invalid_grant":
+        oauth = definition.auth.oauth
+        assert oauth is not None
         return CheckResult(
             [
                 Check(
                     "client",
                     True,
-                    f"{name} accepts this client ID and secret.",
+                    f"{name} accepts this client ID and secret."
+                    if "core" in oauth.redirect
+                    else f"{name} accepts this client ID and secret. It checks "
+                    "the redirect URLs only when someone connects, so the first "
+                    "connection confirms them.",
                     None,
                 )
             ],

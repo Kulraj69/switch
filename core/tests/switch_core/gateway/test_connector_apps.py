@@ -8,6 +8,7 @@ characters.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import secrets
@@ -121,8 +122,9 @@ class FakeGitHub:
 
 class FakeAirtable:
     """Airtable's side: its MCP server names the authorization server, whose
-    token endpoint tells a made-up code for a client it knows, on a redirect
-    the client registered, from anything else."""
+    token endpoint, as Airtable's was seen to, wants a PKCE verifier before
+    anything else, takes the secret only as HTTP Basic, and compares the
+    redirect only with a real code."""
 
     MCP = "https://mcp.airtable.com/mcp"
     RESOURCE = "https://mcp.airtable.com/.well-known/oauth-protected-resource/mcp"
@@ -157,18 +159,24 @@ class FakeAirtable:
                     "authorization_endpoint": f"{self.ISSUER}/authorize",
                     "token_endpoint": f"{self.ISSUER}/token",
                     "code_challenge_methods_supported": ["S256"],
+                    "token_endpoint_auth_methods_supported": [
+                        "client_secret_basic",
+                        "none",
+                    ],
                 },
             )
         if url == f"{self.ISSUER}/token":
             form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
             self.token_requests.append(form)
-            if (form.get("client_id"), form.get("client_secret")) != (
-                self.client_id,
-                self.client_secret,
+            if "code_verifier" not in form:
+                return httpx.Response(400, json={"error": "invalid_request"})
+            pair = f"{self.client_id}:{self.client_secret}".encode()
+            if (
+                request.headers.get("authorization")
+                != f"Basic {base64.b64encode(pair).decode()}"
+                or "client_secret" in form
             ):
                 return httpx.Response(401, json={"error": "invalid_client"})
-            if form.get("redirect_uri") not in AIRTABLE_REDIRECTS:
-                return httpx.Response(400, json={"error": "redirect_uri_mismatch"})
             return httpx.Response(400, json={"error": "invalid_grant"})
         return httpx.Response(404)
 
@@ -725,6 +733,7 @@ class TestLoopbackClients:
         assert saved.json()["source"] == "saved"
         assert checked.status_code == 200, checked.text
         assert checked.json()["ok"] is True
+        assert "the first connection confirms them" in json.dumps(checked.json())
         # The check is a code exchange on a redirect the integration lists.
         assert [
             form["redirect_uri"] for form in local_world.airtable.token_requests

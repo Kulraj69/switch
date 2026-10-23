@@ -60,7 +60,9 @@ shown to the server's operator only, and only with the server's
 the steps above, with the five redirect URLs to copy and the scopes to tick;
 paste the integration's **Client ID** and **Client secret**, and choose
 **Check and save**. Switch first asks Airtable about the client, and saves it
-only if Airtable accepts it. The secret is stored encrypted, like every other
+only if Airtable accepts the client ID and secret together. Airtable compares
+the redirect URLs only when someone connects, so a missing one shows at the
+first connection, not here. The secret is stored encrypted, like every other
 stored credential (see [key rotation](key-rotation.md)), and is in use at
 once: nobody needs to restart anything.
 

@@ -464,7 +464,10 @@ is in [`docs/old/airtable-setup.md`](../old/airtable-setup.md).
   under Connector apps, or names it in `AIRTABLE_CLIENT_CONFIG_PATH`. The
   Connector apps entry lists the five loopback redirects and the scopes the
   integration must tick, needs no `GATEWAY_PUBLIC_URL`, and is checked with a
-  made-up code sent to the first loopback redirect. Airtable offers dynamic registration, but
+  made-up code and verifier sent to the first loopback redirect: Airtable
+  answers `invalid_grant` for the right client ID and secret, `invalid_client`
+  otherwise, and compares the redirect only with a real code, so the first
+  connection confirms it. Airtable offers dynamic registration, but
   files the registered client under the Builder Hub of the first person to
   authorize it. There it stays limited to development, so Airtable refuses
   everyone else ("cannot be used outside of development"), and deleting it
@@ -472,8 +475,13 @@ is in [`docs/old/airtable-setup.md`](../old/airtable-setup.md).
   Core never sees the error. An integration the operator owns and publishes
   (support email, privacy policy, terms of service) avoids both.
 - The endpoints are discovered from the MCP server, whose 401 names its
-  metadata. Airtable accepts the client secret in the token request's body,
-  and also takes none (PKCE alone). Airtable matches the loopback port
+  metadata, which lists `client_secret_basic` and `none` as the token
+  endpoint's methods. An integration with a secret must send it as HTTP
+  Basic: in the body Airtable refuses it, even when right (`invalid_client`).
+  The adapter sends a secret as Basic wherever the metadata lists Basic and
+  not `client_secret_post`, and in the body everywhere else, Google included.
+  Airtable asks for the PKCE verifier before it looks at the client, and
+  matches the loopback port
   exactly, so the entry reuses Atlassian's five ports.
 - Airtable's consent screen chooses bases, interfaces and workspaces, not
   scopes: a person cannot leave the write scopes out, at sign-in or later. So

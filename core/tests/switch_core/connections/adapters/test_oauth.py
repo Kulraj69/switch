@@ -237,6 +237,19 @@ class TestRefresh:
             await adapter.refresh(secret)
         assert vendor.token_requests[-1]["resource"] == MCP_URL
 
+    async def test_sends_the_secret_as_basic_where_the_vendor_takes_only_that(
+        self, vendor
+    ) -> None:
+        vendor.metadata["token_endpoint_auth_methods_supported"] = [
+            "client_secret_basic",
+            "none",
+        ]
+        adapter, _ = _adapter(vendor)
+        secret = await _sign_in(adapter, vendor)
+        await adapter.refresh(secret)
+        assert len(vendor.token_requests) == 2
+        assert not any("client_secret" in form for form in vendor.token_requests)
+
     async def test_a_reusable_refresh_token_is_kept(self) -> None:
         vendor = FakeOAuthServer(rotating=False)
         adapter, _ = _adapter(vendor)

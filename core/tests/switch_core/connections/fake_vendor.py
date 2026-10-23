@@ -421,17 +421,29 @@ class FakeOAuthServer:
             return None
         return self.live_access.get(header.removeprefix("Bearer "))
 
-    def _client_ok(self, form: dict[str, str]) -> bool:
-        client_id = form.get("client_id")
+    def _client_ok(self, request: httpx.Request, form: dict[str, str]) -> bool:
+        """A known client, with its secret where the metadata takes one: in
+        the form body unless it lists only HTTP Basic."""
+        methods = self.metadata.get("token_endpoint_auth_methods_supported", [])
+        header = request.headers.get("authorization", "")
+        if "client_secret_post" not in methods and "client_secret_basic" in methods:
+            if "client_secret" in form:
+                return False
+            client_id, sent = form.get("client_id"), None
+            if header.startswith("Basic "):
+                pair = base64.b64decode(header.removeprefix("Basic ")).decode()
+                client_id, _, sent = pair.partition(":")
+        else:
+            client_id, sent = form.get("client_id"), form.get("client_secret")
         if client_id not in self.clients:
             return False
         secret = self.clients[client_id]
-        return secret is None or form.get("client_secret") == secret
+        return secret is None or sent == secret
 
     def _token(self, request: httpx.Request) -> httpx.Response:
         form = {k: v[0] for k, v in parse_qs(request.content.decode()).items()}
         self.token_requests.append(form)
-        if not self._client_ok(form):
+        if not self._client_ok(request, form):
             return _json(401, {"error": "invalid_client"})
         if form.get("grant_type") == "authorization_code":
             pending = self.codes.pop(form.get("code", ""), None)
