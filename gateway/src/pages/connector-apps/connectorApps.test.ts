@@ -283,9 +283,11 @@ describe("wording", () => {
   });
 });
 
-const AIRTABLE_REDIRECTS = [39231, 39232, 39233, 39234, 39235].map(
+const LOOPBACK_REDIRECTS = [39231, 39232, 39233, 39234, 39235].map(
   (port) => `http://127.0.0.1:${port}/switch-services/callback`,
 );
+
+const AIRTABLE_CALLBACK = `${PUBLIC_URL}/gateway/service-connections/airtable/flows/callback`;
 
 const AIRTABLE = app({
   slug: "airtable",
@@ -295,20 +297,30 @@ const AIRTABLE = app({
   saved_client_id: null,
   configuration_variables: ["AIRTABLE_CLIENT_CONFIG_PATH"],
   secrets: { client_secret: { set: false, last4: null } },
-  redirect_uri: AIRTABLE_REDIRECTS[0]!,
-  redirect_uris: AIRTABLE_REDIRECTS,
-  needs_public_url: false,
+  redirect_uri: AIRTABLE_CALLBACK,
+  redirect_uris: [AIRTABLE_CALLBACK],
+  needs_public_url: true,
   scopes: ["data.records:read", "data.records:write"],
   connected_members: 0,
   workspaces: 0,
 });
 
-describe("an app that sends people back to Switch Console", () => {
-  it("walks Airtable's Builder Hub, with every redirect to paste and the scopes to tick", () => {
+/** An app whose sign-ins return to Switch Console, on one of several ports. */
+const LOOPBACK = app({
+  ...AIRTABLE,
+  slug: "example",
+  name: "Example",
+  redirect_uri: LOOPBACK_REDIRECTS[0]!,
+  redirect_uris: LOOPBACK_REDIRECTS,
+  needs_public_url: false,
+});
+
+describe("Airtable, and an app that sends people back to Switch Console", () => {
+  it("walks Airtable's Builder Hub, with its redirect to paste and the scopes to tick", () => {
     const steps = setupInstructions(AIRTABLE, "internal", null);
     expect(steps[0]!.link).toEqual({ label: "Open Builder Hub", href: "https://airtable.com/create/oauth" });
     expect(steps[0]!.text).toMatch(/account your organization owns/);
-    expect(steps.flatMap((s) => s.copy)).toEqual(AIRTABLE_REDIRECTS);
+    expect(steps.flatMap((s) => s.copy)).toEqual([AIRTABLE_CALLBACK]);
     expect(new Set(steps.map((s) => s.text)).size).toBe(steps.length);
     const texts = steps.map((s) => s.text);
     expect(steps.find((s) => s.text === "Under Scopes, tick exactly these:")?.items).toEqual(["data.records:read, data.records:write"]);
@@ -324,12 +336,13 @@ describe("an app that sends people back to Switch Console", () => {
     expect(confirmBeforeCheck(NONE)).toBeNull();
   });
 
-  it("can be set up on a server with no public URL, and doesn't raise the banner", () => {
-    expect(changeBlocked(AIRTABLE, null)).toBe(false);
+  it("an app that sends people back to Switch Console needs no public URL, and raises no banner", () => {
+    expect(changeBlocked(LOOPBACK, null)).toBe(false);
     expect(changeBlocked(NONE, null)).toBe(true);
-    expect(missingPublicUrl([AIRTABLE], null)).toBe(false);
-    expect(missingPublicUrl([AIRTABLE, NONE], null)).toBe(true);
-    expect(missingPublicUrl([AIRTABLE, NONE], PUBLIC_URL)).toBe(false);
+    expect(missingPublicUrl([LOOPBACK], null)).toBe(false);
+    expect(missingPublicUrl([LOOPBACK, NONE], null)).toBe(true);
+    expect(missingPublicUrl([LOOPBACK, NONE], PUBLIC_URL)).toBe(false);
+    expect(changeBlocked(AIRTABLE, null)).toBe(true);
   });
 
   it("names Airtable's Helm value when moving off configuration", () => {
@@ -340,9 +353,9 @@ describe("an app that sends people back to Switch Console", () => {
   });
 
   it("lists every redirect for another vendor that has several", () => {
-    const steps = setupInstructions(app({ ...AIRTABLE, slug: "example", name: "Example" }), "internal", null);
+    const steps = setupInstructions(LOOPBACK, "internal", null);
     expect(steps[0]!.text).toBe("Register an OAuth client for Switch at Example, with these redirect URIs:");
-    expect(steps.flatMap((s) => s.copy)).toEqual(AIRTABLE_REDIRECTS);
+    expect(steps.flatMap((s) => s.copy)).toEqual(LOOPBACK_REDIRECTS);
   });
 });
 

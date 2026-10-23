@@ -10,7 +10,7 @@ request it must refuse, and reads which refusal it chose.
 - **OAuth client**: a code exchange at the token endpoint with a made-up
   code and PKCE verifier, the secret sent as a sign-in sends it, to a
   redirect URI the client registers: Core's own callback, or Switch
-  Console's first loopback one. `invalid_grant` means the client id and
+  Console's first loopback one for a client that has no other. `invalid_grant` means the client id and
   secret are right; `invalid_client` that they are not; and
   `redirect_uri_mismatch` that the redirect URI is not registered. What the
   vendor does not show this way (Airtable compares redirect URIs only with a

@@ -65,7 +65,9 @@ version of their own to them without also giving them a release of their own.
   publishes an Airtable OAuth integration and saves it under Connector apps,
   or names it in `AIRTABLE_CLIENT_CONFIG_PATH` (Helm:
   `switchCore.airtableClientSecret`); see `docs/old/airtable-setup.md`.
-  Without it, Airtable is listed as not set up.
+  Without it, Airtable is listed as not set up. Like Google Workspace, it
+  needs `GATEWAY_PUBLIC_URL`: Airtable sends people back to the server's own
+  callback.
   Airtable offers no read-only sign-in, so every connection can write;
   changing tables and fields is not asked for, and Airtable refuses it.
   Airtable cannot revoke a sign-in, and an integration reaches the bases of
@@ -73,15 +75,12 @@ version of their own to them without also giving them a release of their own.
   and widens their next connection. Disconnecting or reconnecting says so and
   where in Airtable to remove it, as any OAuth service without revocation now
   does rather than reporting a failed revoke.
-- **Connector apps fit a client that signs in through Switch Console.** An
-  app's entry in `GET /connector-apps` gains `redirect_uris` (every address
-  to register: one per loopback port where the vendor matches the port),
-  `needs_public_url` and `scopes`. An app whose sign-ins return to Switch
-  Console, such as Airtable's, is set up and checked without
-  `GATEWAY_PUBLIC_URL`, and its check sends a loopback redirect. The
-  dashboard's Connectors page walks Airtable's Builder Hub, and saves only
-  once the operator confirms the integration's support details are set: no
-  check can see whether it is published, so a passing one says so.
+- **Connector apps set up Airtable.** An app's entry in `GET /connector-apps`
+  gains `redirect_uris` (every address to register), `needs_public_url` and
+  `scopes`. The dashboard's Connectors page walks Airtable's Builder Hub, with
+  its redirect URL to copy and the scopes to tick, and saves only once the
+  operator confirms the integration's support details are set: no check can
+  see whether it is published, so a passing one says so.
 
 #### Changed
 - **Following the conversation is described the same way everywhere, and the
@@ -1911,10 +1910,9 @@ version of their own to them without also giving them a release of their own.
 #### Added
 - **Airtable's logo on the Connections grid.**
 - **Admin → Connector apps sets up Airtable.** Its dialog walks Airtable's
-  Builder Hub with the five redirect URLs to copy and the scopes to tick, asks
-  the operator to confirm the integration's support details are set, which
-  no check can see, and an app whose sign-ins return to Switch Console can be
-  set up on a server without a public URL. A server that does not send `redirect_uris`,
+  Builder Hub with the redirect URL to copy and the scopes to tick, and asks
+  the operator to confirm the integration's support details are set, which no
+  check can see. A server that does not send `redirect_uris`,
   `needs_public_url` and `scopes` is read as before.
 
 #### Changed

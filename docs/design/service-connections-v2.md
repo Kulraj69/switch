@@ -463,9 +463,12 @@ is in [`docs/old/airtable-setup.md`](../old/airtable-setup.md).
 
 - Each server's operator registers an Airtable OAuth integration and saves it
   under Connector apps, or names it in `AIRTABLE_CLIENT_CONFIG_PATH`. The
-  Connector apps entry lists the five loopback redirects and the scopes the
-  integration must tick, needs no `GATEWAY_PUBLIC_URL`, and is checked with a
-  made-up code and verifier sent to the first loopback redirect: Airtable
+  browser comes back to Core's own callback, as Google's does, so the server
+  needs `GATEWAY_PUBLIC_URL` and nothing listens on people's computers; a
+  loopback redirect would work on any server, but the operator chose the
+  https callback. The Connector apps entry lists the callback and the scopes
+  the integration must tick, and is checked with a made-up code and verifier
+  sent to the callback: Airtable
   answers `invalid_grant` for the right client ID and secret, `invalid_client`
   otherwise, and compares the redirect only with a real code, so the first
   connection confirms it. Airtable offers dynamic registration, but
@@ -481,9 +484,7 @@ is in [`docs/old/airtable-setup.md`](../old/airtable-setup.md).
   Basic: in the body Airtable refuses it, even when right (`invalid_client`).
   The adapter sends a secret as Basic wherever the metadata lists Basic and
   not `client_secret_post`, and in the body everywhere else, Google included.
-  Airtable asks for the PKCE verifier before it looks at the client, and
-  matches the loopback port
-  exactly, so the entry reuses Atlassian's five ports.
+  Airtable asks for the PKCE verifier before it looks at the client.
 - Airtable's consent screen chooses bases, interfaces and workspaces, not
   scopes: a person cannot leave the write scopes out, at sign-in or later. So
   every connection is granted the write level, and what an agent reaches is

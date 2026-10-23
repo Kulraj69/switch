@@ -181,11 +181,11 @@ def test_the_shipped_airtable_entry_signs_in_as_the_spike_found_it_must():
     assert (definition.adapter, oauth.registration, oauth.redirect) == (
         "oauth",
         "static",
-        ["loopback"],
+        ["core"],
     )
     assert oauth.client_settings == "AIRTABLE"
-    # Airtable matches a loopback redirect's port, so the ports are fixed.
-    assert oauth.loopback_ports == [39231, 39232, 39233, 39234, 39235]
+    # Back to Core's own https callback, as Google Workspace's.
+    assert oauth.loopback_ports is None
     # Airtable has no revocation endpoint, so people remove Switch there, and
     # are told a sign-in left behind widens the next.
     assert (oauth.revocation_url, oauth.revocation_discovered) == (None, False)

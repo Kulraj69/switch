@@ -338,10 +338,7 @@ export function setupInstructions(
         link: null,
         items: [],
       },
-      redirectStep(
-        'Under OAuth redirect URLs, add all of these. Airtable matches the port, and Switch Console uses whichever one is free:',
-        redirectUris(app)
-      ),
+      redirectStep('Under OAuth redirect URLs, add this one:', redirectUris(app)),
       {
         text: 'Under Scopes, tick exactly these:',
         copy: [],

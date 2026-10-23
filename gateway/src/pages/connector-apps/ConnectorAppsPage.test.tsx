@@ -187,9 +187,9 @@ describe("ConnectorAppsPage", () => {
       ...NONE_GOOGLE,
       slug: "airtable",
       name: "Airtable",
-      redirect_uri: "http://127.0.0.1:39231/switch-services/callback",
-      redirect_uris: ["http://127.0.0.1:39231/switch-services/callback"],
-      needs_public_url: false,
+      redirect_uri: "https://switch.example.test/gateway/service-connections/airtable/flows/callback",
+      redirect_uris: ["https://switch.example.test/gateway/service-connections/airtable/flows/callback"],
+      needs_public_url: true,
       scopes: ["data.records:read"],
     };
     const calls = serve(listOf(airtable), {

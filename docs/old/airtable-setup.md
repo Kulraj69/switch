@@ -21,8 +21,9 @@ Without the integration, Airtable is listed on the server as not set up.
   refused with "This OAuth application cannot be used outside of
   development."
 
-No public address is needed: sign-ins return to Switch Console on the
-person's own computer.
+- The server's **`GATEWAY_PUBLIC_URL`**: the address people reach Switch at.
+  Airtable sends people back to Switch there, as Google Workspace does;
+  without it, Airtable cannot be set up.
 
 ## Register the integration
 
@@ -31,14 +32,11 @@ In Airtable, open **Builder Hub**, then **OAuth integrations**, then
 
 1. **Name** it as people should see it on Airtable's consent page, for example
    "Switch".
-2. **OAuth redirect URLs**: all five, exactly. Airtable matches the port.
+2. **OAuth redirect URL**: the server's callback, exactly:
    ```
-   http://127.0.0.1:39231/switch-services/callback
-   http://127.0.0.1:39232/switch-services/callback
-   http://127.0.0.1:39233/switch-services/callback
-   http://127.0.0.1:39234/switch-services/callback
-   http://127.0.0.1:39235/switch-services/callback
+   <GATEWAY_PUBLIC_URL>/gateway/service-connections/airtable/flows/callback
    ```
+   If the public URL changes, change it here too, or sign-ins fail.
 3. **Scopes**: exactly these six.
    - `data.records:read`, `data.records:write`
    - `data.recordComments:read`, `data.recordComments:write`
@@ -58,19 +56,15 @@ In Switch Console, open **Admin** in the sidebar and **Connector apps** under
 Server, or in the Switch dashboard open **Connectors** beside Users. Both are
 shown to the server's operator only, and only with the server's
 `service_connections` flag on. Choose **Set up Airtable**. The dialog walks
-the steps above, with the five redirect URLs to copy and the scopes to tick;
+the steps above, with the redirect URL to copy and the scopes to tick;
 paste the integration's **Client ID** and **Client secret**, tick that its
 support details are set, and choose **Check and save**. Switch first asks
 Airtable about the client, and saves it only if Airtable accepts the client ID
-and secret together. That cannot show the redirect URLs or whether the
+and secret together. That cannot show the redirect URL or whether the
 integration is published, so have someone other than its owner connect once
 to confirm both. The secret is stored encrypted, like every other
 stored credential (see [key rotation](key-rotation.md)), and is in use at
 once: nobody needs to restart anything.
-
-Airtable does not need `GATEWAY_PUBLIC_URL`: its sign-ins return to Switch
-Console on the person's own computer, so Airtable can be set up on a server
-without a public address.
 
 The card then offers **Check it works**, **Update secret**, **Use a different
 app** and **Remove**, as for Google Workspace (see

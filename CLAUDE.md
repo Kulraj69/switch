@@ -185,7 +185,7 @@ Tests live in `core/tests/switch_core/` mirroring the module structure. Uses pyt
   for Slack, Mattermost, Discord, Teams, and Telegram
 - `docs/old/airtable-setup.md` — offering Airtable on a self-hosted server:
   registering and publishing the Airtable OAuth integration, its redirect
-  URLs and scopes, saving it under Connector apps or in
+  URL and scopes, saving it under Connector apps or in
   `AIRTABLE_CLIENT_CONFIG_PATH`, and switching it off
 - `docs/old/GATEWAY_OIDC_SETUP.md` — configuring the gateway's bring-your-own
   OIDC browser sign-in (variables, redirect URI, WorkOS Connect setup)

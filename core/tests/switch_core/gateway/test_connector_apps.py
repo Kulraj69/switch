@@ -66,10 +66,7 @@ HTTP_PUBLIC = "http://switch.example.com"
 APPS = "/gateway/connector-apps"
 GOOGLE = "google-workspace"
 AIRTABLE = "airtable"
-AIRTABLE_REDIRECTS = [
-    f"http://127.0.0.1:{port}/switch-services/callback"
-    for port in (39231, 39232, 39233, 39234, 39235)
-]
+AIRTABLE_CALLBACK = f"{PUBLIC}/gateway/service-connections/{AIRTABLE}/flows/callback"
 AIRTABLE_SECRET = "example-airtable-secret-0000"
 GITHUB_CLIENT_ID = "example-github-client-id"
 GITHUB_SECRET = "example-github-secret-0000"
@@ -378,11 +375,11 @@ class TestOnlyTheOperator:
         assert apps["github"]["redirect_uris"] == [github]
         assert apps["github"]["needs_public_url"] is True
         assert apps["github"]["scopes"] == []
-        # Airtable sends people back to Switch Console, on any of its ports,
-        # and its integration lists the scopes a sign-in may ask for.
-        assert apps[AIRTABLE]["redirect_uris"] == AIRTABLE_REDIRECTS
-        assert apps[AIRTABLE]["redirect_uri"] == AIRTABLE_REDIRECTS[0]
-        assert apps[AIRTABLE]["needs_public_url"] is False
+        # Airtable comes back to Core's own callback, as Google does, and its
+        # integration lists the scopes a sign-in may ask for.
+        assert apps[AIRTABLE]["redirect_uris"] == [AIRTABLE_CALLBACK]
+        assert apps[AIRTABLE]["redirect_uri"] == AIRTABLE_CALLBACK
+        assert apps[AIRTABLE]["needs_public_url"] is True
         assert apps[AIRTABLE]["scopes"] == [
             "data.records:read",
             "schema.bases:read",
@@ -712,12 +709,12 @@ class TestGitHubNeedsHttps:
         assert len(await _rows(session_factory)) == 1
 
 
-class TestLoopbackClients:
-    async def test_airtable_is_set_up_on_a_server_with_no_public_address(
-        self, local_world: World, operator, session_factory
+class TestAirtable:
+    async def test_airtable_is_checked_on_its_server_callback(
+        self, world: World, operator, session_factory
     ) -> None:
-        await local_world.install()
-        async with local_world.harness.client() as client:
+        await world.install()
+        async with world.harness.client() as client:
             cookies = cookies_for(operator)
             saved = await client.put(
                 f"{APPS}/{AIRTABLE}",
@@ -725,32 +722,39 @@ class TestLoopbackClients:
                 cookies=cookies,
             )
             checked = await client.post(f"{APPS}/{AIRTABLE}/check", cookies=cookies)
-            google = await client.put(
-                f"{APPS}/{GOOGLE}", json=_google_body(), cookies=cookies
-            )
-            listed = await client.get(APPS, cookies=cookies)
         assert saved.status_code == 200, saved.text
         assert saved.json()["source"] == "saved"
         assert checked.status_code == 200, checked.text
         assert checked.json()["ok"] is True
         assert "only you can connect" in json.dumps(checked.json())
-        # The check is a code exchange on a redirect the integration lists.
-        assert [
-            form["redirect_uri"] for form in local_world.airtable.token_requests
-        ] == [AIRTABLE_REDIRECTS[0]] * 2
-        assert google.status_code == 409
-        assert "GATEWAY_PUBLIC_URL" in google.json()["detail"]
-        apps = {entry["slug"]: entry for entry in listed.json()["apps"]}
-        assert apps[AIRTABLE]["redirect_uris"] == AIRTABLE_REDIRECTS
-        assert apps[GOOGLE]["redirect_uris"] == []
-        assert apps[GOOGLE]["redirect_uri"] is None
+        # The check is a code exchange on the redirect the integration lists.
+        assert [form["redirect_uri"] for form in world.airtable.token_requests] == [
+            AIRTABLE_CALLBACK
+        ] * 2
         assert len(await _rows(session_factory)) == 1
 
-    async def test_a_wrong_airtable_secret_is_refused_and_not_stored(
+    async def test_airtable_needs_the_public_url_as_google_does(
         self, local_world: World, operator, session_factory
     ) -> None:
         await local_world.install()
         async with local_world.harness.client() as client:
+            refused = await client.put(
+                f"{APPS}/{AIRTABLE}",
+                json=_google_body(client_secret=AIRTABLE_SECRET),
+                cookies=cookies_for(operator),
+            )
+            listed = await client.get(APPS, cookies=cookies_for(operator))
+        assert refused.status_code == 409
+        assert "GATEWAY_PUBLIC_URL" in refused.json()["detail"]
+        apps = {entry["slug"]: entry for entry in listed.json()["apps"]}
+        assert apps[AIRTABLE]["redirect_uris"] == []
+        assert await _rows(session_factory) == []
+
+    async def test_a_wrong_airtable_secret_is_refused_and_not_stored(
+        self, world: World, operator, session_factory
+    ) -> None:
+        await world.install()
+        async with world.harness.client() as client:
             refused = await client.put(
                 f"{APPS}/{AIRTABLE}",
                 json=_google_body(client_secret="example-wrong-secret-0000"),

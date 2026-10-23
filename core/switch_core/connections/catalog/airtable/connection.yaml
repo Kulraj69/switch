@@ -18,13 +18,13 @@ auth:
     # On Enterprise plans an admin may have to allowlist the client id.
     registration: static
     client_settings: AIRTABLE
-    # Airtable matches a loopback redirect exactly, port included.
-    redirect: [loopback]
-    loopback_ports: [39231, 39232, 39233, 39234, 39235]
+    # Back to Core's own https callback, as Google's: the server needs
+    # GATEWAY_PUBLIC_URL, and nothing listens on people's computers.
+    redirect: [core]
     # Airtable compares the redirect only with a real code, and nothing short
     # of someone else's sign-in shows whether the integration is published.
     unchecked: >-
-      Switch can't see its redirect URLs or whether it is published. Until its
+      Switch can't see its redirect URL or whether it is published. Until its
       support email, privacy policy and terms of service are set, only you can
       connect. Have someone else connect once to confirm.
     # Airtable has no revocation endpoint, so a sign-in Switch drops lives on
