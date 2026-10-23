@@ -37,7 +37,7 @@ const PUSHED_RECONCILE_MS = 5 * 60_000;
  * that failed is tried again at the polling rate even while the socket is up,
  * since no notice may come to retry it.
  */
-function refreshEvery(pollMs: number, pushed: boolean, failed: boolean): number {
+export function refreshEvery(pollMs: number, pushed: boolean, failed: boolean): number {
   return pushed && !failed ? PUSHED_RECONCILE_MS : pollMs;
 }
 
