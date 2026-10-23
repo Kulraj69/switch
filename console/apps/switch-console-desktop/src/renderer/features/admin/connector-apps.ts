@@ -38,8 +38,8 @@ export type Audience = 'internal' | 'external';
 
 export interface Instruction {
   text: string;
-  /** A value to paste at the vendor, offered with a copy button. */
-  copy: string | null;
+  /** Values to paste at the vendor, each offered with a copy button. */
+  copy: string[];
   /** The vendor's page for this step, where it has one of its own. */
   link: { label: string; href: string } | null;
   /** Values to pick at the vendor, one per line. */
@@ -252,19 +252,23 @@ export function audienceText(audience: Audience): string {
 
 const GOOGLE_CLOUD = 'https://console.cloud.google.com';
 
-/** One step per address: a vendor that matches the port needs every one. */
-function redirectSteps(intro: string, redirects: string[]): Instruction[] {
-  if (redirects.length <= 1)
-    return [{ text: intro, copy: redirects[0] ?? null, link: null, items: [] }];
-  return [
-    { text: intro, copy: null, link: null, items: [] },
-    ...redirects.map((redirect, index) => ({
-      text: `Redirect URL ${index + 1} of ${redirects.length}:`,
-      copy: redirect,
-      link: null,
-      items: [],
-    })),
-  ];
+/** The addresses to register, in one step: a vendor that matches the port needs every one. */
+function redirectStep(intro: string, redirects: string[]): Instruction {
+  return { text: intro, copy: redirects, link: null, items: [] };
+}
+
+/** Scopes one row per resource, its read and write side by side. */
+function scopeRows(scopes: string[]): string[] {
+  const rows = new Map<string, string[]>();
+  for (const scope of scopes) {
+    const resource = scope.slice(0, scope.lastIndexOf(':'));
+    rows.set(resource, [...(rows.get(resource) ?? []), scope]);
+  }
+  return [...rows.values()].map((row) => row.join(', '));
+}
+
+function present(value: string | null): string[] {
+  return value === null ? [] : [value];
 }
 
 /** Step 1 of setting up: creating the app at the vendor, one page at a time. */
@@ -278,44 +282,44 @@ export function setupInstructions(
     return [
       {
         text: "In GitHub, create a new GitHub App: Settings, Developer settings, GitHub Apps. For an App owned by an organization, start from the organization's settings instead.",
-        copy: null,
+        copy: [],
         link: { label: 'Open GitHub', href: 'https://github.com/settings/apps/new' },
         items: [],
       },
       {
         text: "Set the Homepage URL to Switch's public URL:",
-        copy: publicUrl,
+        copy: present(publicUrl),
         link: null,
         items: [],
       },
-      { text: 'Set the Callback URL to:', copy: redirect, link: null, items: [] },
+      { text: 'Set the Callback URL to:', copy: present(redirect), link: null, items: [] },
       {
         text: 'Keep Expire user authorization tokens turned on.',
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
       {
         text: "Under Webhook, untick Active. Switch doesn't use GitHub's webhooks, and GitHub asks for a webhook URL while it is ticked.",
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
       {
         text: 'Under Repository permissions, set Contents and Pull requests to Read and write.',
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
       {
         text: "Under Where can this GitHub App be installed, choose Any account, so people can install it on their own accounts and organizations. Choose Only on this account only if every member's repositories are in your own organization.",
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
       {
         text: 'Create the GitHub App. On its page, generate a client secret, then a private key, and keep the downloaded .pem file.',
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
@@ -324,35 +328,35 @@ export function setupInstructions(
     return [
       {
         text: "In Airtable's Builder Hub, under OAuth integrations, register a new OAuth integration. Use an Airtable account your organization owns: whoever owns the integration can delete it, and that stops every connection.",
-        copy: null,
+        copy: [],
         link: { label: 'Open Builder Hub', href: 'https://airtable.com/create/oauth' },
         items: [],
       },
       {
         text: "Name it as people should see it on Airtable's consent page, for example Switch.",
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
-      ...redirectSteps(
+      redirectStep(
         'Under OAuth redirect URLs, add all of these. Airtable matches the port, and Switch Console uses whichever one is free:',
         redirectUris(app)
       ),
       {
         text: 'Under Scopes, tick exactly these:',
-        copy: null,
+        copy: [],
         link: null,
-        items: app.scopes,
+        items: scopeRows(app.scopes),
       },
       {
         text: 'Register the integration. On its page, generate a client secret, and copy the Client ID and the secret.',
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
       {
         text: 'Fill in its support email, privacy policy URL and terms of service URL. Until all three are set, Airtable lets only the owner connect.',
-        copy: null,
+        copy: [],
         link: null,
         items: [],
       },
@@ -361,46 +365,48 @@ export function setupInstructions(
     return [
       {
         text: 'In Google Cloud, create a project for Switch, or pick an existing one.',
-        copy: null,
+        copy: [],
         link: { label: 'Create a project', href: `${GOOGLE_CLOUD}/projectcreate` },
         items: [],
       },
       {
         text: 'In Google Auth Platform, under Branding, enter an app name people will recognise and a support email.',
-        copy: null,
+        copy: [],
         link: { label: 'Open Branding', href: `${GOOGLE_CLOUD}/auth/branding` },
         items: [],
       },
       {
         text: audienceText(audience),
-        copy: null,
+        copy: [],
         link: { label: 'Open Audience', href: `${GOOGLE_CLOUD}/auth/audience` },
         items: [],
       },
       {
         text: 'Under Clients, create a client of type Web application.',
-        copy: null,
+        copy: [],
         link: { label: 'Open Clients', href: `${GOOGLE_CLOUD}/auth/clients` },
         items: [],
       },
       {
         text: 'Add this under Authorized redirect URIs, create the client, and copy its Client ID and Client secret:',
-        copy: redirect,
+        copy: present(redirect),
         link: null,
         items: [],
       },
       {
         text: 'Enable the Google Drive, Docs, Sheets, Slides and Calendar APIs for the project.',
-        copy: null,
+        copy: [],
         link: { label: 'Open the API Library', href: `${GOOGLE_CLOUD}/apis/library` },
         items: [],
       },
     ];
   const redirects = redirectUris(app);
-  return redirectSteps(
-    `Register an OAuth client for Switch at ${app.name}, with ${redirects.length > 1 ? 'these redirect URIs' : 'this redirect URI'}:`,
-    redirects
-  );
+  return [
+    redirectStep(
+      `Register an OAuth client for Switch at ${app.name}, with ${redirects.length > 1 ? 'these redirect URIs' : 'this redirect URI'}:`,
+      redirects
+    ),
+  ];
 }
 
 export const UPDATE_SECRET_NOTE = 'Nobody is disconnected.';

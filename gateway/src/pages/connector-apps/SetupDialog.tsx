@@ -278,7 +278,9 @@ export default function SetupDialog({
                         ))}
                       </Box>
                     )}
-                    {instruction.copy && <Copyable value={instruction.copy} />}
+                    {instruction.copy.map((value) => (
+                      <Copyable key={value} value={value} />
+                    ))}
                   </Box>
                 ))}
               </Box>

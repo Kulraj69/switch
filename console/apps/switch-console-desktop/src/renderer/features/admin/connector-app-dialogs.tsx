@@ -331,7 +331,9 @@ export function ConnectorAppSetupDialog({
                       ))}
                     </ul>
                   )}
-                  {instruction.copy && <Copyable value={instruction.copy} />}
+                  {instruction.copy.map((value) => (
+                    <Copyable key={value} value={value} />
+                  ))}
                 </li>
               ))}
             </ol>

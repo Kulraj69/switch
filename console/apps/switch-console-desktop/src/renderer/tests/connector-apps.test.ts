@@ -296,7 +296,7 @@ describe('wording', () => {
       'https://console.cloud.google.com/apis/library',
     ]);
     expect(steps[1]!.text).toMatch(/app name .* support email/);
-    expect(steps[4]!.copy).toBe(NONE.redirect_uri);
+    expect(steps[4]!.copy).toEqual([NONE.redirect_uri]);
     expect(steps[5]!.text).toBe(
       'Enable the Google Drive, Docs, Sheets, Slides and Calendar APIs for the project.'
     );
@@ -309,10 +309,7 @@ describe('wording', () => {
       href: 'https://github.com/settings/apps/new',
     });
     expect(steps.slice(1).every((s) => s.link === null)).toBe(true);
-    expect(steps.map((s) => s.copy).filter((c) => c !== null)).toEqual([
-      PUBLIC_URL,
-      GITHUB.redirect_uri,
-    ]);
+    expect(steps.flatMap((s) => s.copy)).toEqual([PUBLIC_URL, GITHUB.redirect_uri]);
     const texts = steps.map((s) => s.text);
     expect(texts[1]).toMatch(/^Set the Homepage URL/);
     expect(texts[2]).toMatch(/^Set the Callback URL/);
@@ -370,13 +367,13 @@ describe('an app that sends people back to Switch Console', () => {
       href: 'https://airtable.com/create/oauth',
     });
     expect(steps[0]!.text).toMatch(/account your organization owns/);
-    expect(steps.map((s) => s.copy).filter((c) => c !== null)).toEqual(AIRTABLE_REDIRECTS);
+    expect(steps.flatMap((s) => s.copy)).toEqual(AIRTABLE_REDIRECTS);
     expect(new Set(steps.map((s) => s.text)).size).toBe(steps.length);
     const texts = steps.map((s) => s.text);
     expect(steps.find((s) => s.text === 'Under Scopes, tick exactly these:')?.items).toEqual([
-      'data.records:read',
-      'data.records:write',
+      'data.records:read, data.records:write',
     ]);
+    expect(steps.filter((s) => s.copy.length > 0)).toHaveLength(1);
     expect(texts.at(-1)).toMatch(/support email, privacy policy URL and terms of service URL/);
   });
 
