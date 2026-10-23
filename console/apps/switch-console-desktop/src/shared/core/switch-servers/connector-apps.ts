@@ -95,6 +95,11 @@ export const connectorAppCheckResultSchema = z.object({
 });
 export type ConnectorAppCheckResult = z.infer<typeof connectorAppCheckResultSchema>;
 
+/** `PUT /connector-apps/{service}`: the saved app, and what its check said. */
+export const savedConnectorAppSchema = connectorAppSchema.extend({
+  checks: z.array(connectorAppCheckSchema).default([]),
+});
+
 /** Who is connected through an app, or would have to reconnect if another replaced it. */
 export const connectorAppImpactSchema = z.object({
   connected_members: z.number().int(),
@@ -124,7 +129,12 @@ export type SaveConnectorAppInput = {
  * other failure is thrown.
  */
 export type SaveConnectorAppResult =
-  | { kind: 'saved'; app: ConnectorApp }
+  | {
+      kind: 'saved';
+      app: ConnectorApp;
+      /** What the vendor said when Switch checked the app it saved; none from an older server. */
+      checks: ConnectorAppCheck[];
+    }
   | {
       kind: 'refused';
       message: string;

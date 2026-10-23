@@ -455,6 +455,14 @@ it('says what is missing before an app can be set up, and holds the button', asy
   ).toBe(true);
 });
 
+const SAVED_CHECK = {
+  name: 'client',
+  ok: true,
+  message: 'Google Workspace accepts this client ID and secret.',
+  field: null,
+  note: "Switch can't check the redirect URI. Connect once to confirm.",
+};
+
 it('marks the value the vendor refused, and saves once it is right', async () => {
   const onSuccess = vi.fn();
   switchServers.saveConnectorApp
@@ -464,12 +472,13 @@ it('marks the value the vendor refused, and saves once it is right', async () =>
       field: 'client_secret',
       checks: [],
     })
-    .mockResolvedValueOnce({ kind: 'saved', app: GOOGLE });
+    .mockResolvedValueOnce({ kind: 'saved', app: GOOGLE, checks: [SAVED_CHECK] });
   switchServers.getConnectorApps.mockResolvedValue({ public_url: null, apps: [GOOGLE] });
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+  // Kept as the app keeps it, for the app's page to read after the save.
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () =>
     root!.render(
       <QueryClientProvider client={client}>
@@ -519,4 +528,8 @@ it('marks the value the vendor refused, and saves once it is right', async () =>
   expect(dialog.querySelector('[role="alert"]')).toBeNull();
   await act(async () => button(/^Check and save$/, dialog)!.click());
   await vi.waitFor(() => expect(onSuccess).toHaveBeenCalledWith('Google Workspace is ready.'));
+  // What the save's check said is kept for the app's page, note and all.
+  expect(client.getQueryData(['connector-app-checks', 'server', 'google-workspace'])).toEqual([
+    SAVED_CHECK,
+  ]);
 });

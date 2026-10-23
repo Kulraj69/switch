@@ -2425,10 +2425,16 @@ export async function fetchConnectorApps(): Promise<ConnectorApps> {
   return jsonRequest<ConnectorApps>("/connector-apps", "GET");
 }
 
+/** A saved app, and what the vendor said when Switch checked it; none from an older server. */
+export interface SavedConnectorApp {
+  app: ConnectorApp;
+  checks: ConnectorAppCheck[];
+}
+
 export async function saveConnectorApp(
   service: string,
   input: SaveConnectorAppInput,
-): Promise<ConnectorApp> {
+): Promise<SavedConnectorApp> {
   const res = await fetch(`${BASE}/connector-apps/${service}`, {
     method: "PUT",
     credentials: "include",
@@ -2444,7 +2450,8 @@ export async function saveConnectorApp(
     }
     throw new ApiError(res.status, detail, message);
   }
-  return payload as ConnectorApp;
+  const { checks, ...app } = payload as ConnectorApp & { checks?: ConnectorAppCheck[] };
+  return { app, checks: checks ?? [] };
 }
 
 export async function importConnectorApp(service: string): Promise<ConnectorApp> {

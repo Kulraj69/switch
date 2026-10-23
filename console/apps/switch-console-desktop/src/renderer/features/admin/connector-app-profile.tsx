@@ -15,7 +15,7 @@ import {
   DropdownMenuTrigger,
 } from '@renderer/lib/ui/dropdown-menu';
 import { Spinner } from '@renderer/lib/ui/spinner';
-import type { ConnectorApp, ConnectorAppCheck } from '@shared/core/switch-servers/connector-apps';
+import type { ConnectorApp } from '@shared/core/switch-servers/connector-apps';
 import {
   type DetailRow,
   STATE_BADGE,
@@ -32,6 +32,7 @@ import {
   stateLabel,
   usedBy,
 } from './connector-apps';
+import { useLastChecks } from './connector-apps-queries';
 import { useConnectorAppDialogs } from './connector-apps-tab';
 import { CopyButton } from './copy-button';
 
@@ -58,7 +59,7 @@ export function ConnectorAppProfile({
   onBack: () => void;
 }) {
   const open = useConnectorAppDialogs(serverId, publicUrl);
-  const [checks, setChecks] = useState<ConnectorAppCheck[] | null>(null);
+  const [checks, setChecks] = useLastChecks(serverId, app.slug);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

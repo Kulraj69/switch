@@ -193,7 +193,22 @@ describe("ConnectorAppsPage", () => {
       scopes: ["data.records:read"],
     };
     const calls = serve(listOf(airtable), {
-      "PUT /gateway/connector-apps/airtable": [200, { ...airtable, source: "saved" }],
+      "PUT /gateway/connector-apps/airtable": [
+        200,
+        {
+          ...airtable,
+          source: "saved",
+          checks: [
+            {
+              name: "client",
+              ok: true,
+              message: "Airtable accepts this client ID and secret.",
+              field: null,
+              note: "Have someone else connect once to confirm.",
+            },
+          ],
+        },
+      ],
     });
     render(<ConnectorAppsPage />);
     fireEvent.click(await screen.findByRole("button", { name: "Set up Airtable" }));
@@ -206,6 +221,9 @@ describe("ConnectorAppsPage", () => {
     expect(save.disabled).toBe(false);
     fireEvent.click(save);
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    // What the check said on saving stays on the card, its note included.
+    expect(await card("airtable").findByText("Airtable accepts this client ID and secret.")).toBeTruthy();
+    expect(card("airtable").getByText(/Have someone else connect once to confirm\./)).toBeTruthy();
   });
 
   it("shows what a passing check could not see as a note", async () => {

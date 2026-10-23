@@ -38,7 +38,7 @@ import {
   switchWarning,
   vendorName,
 } from './connector-apps';
-import { useReloadConnectorApps } from './connector-apps-queries';
+import { useReloadConnectorApps, useRememberChecks } from './connector-apps-queries';
 import { CopyButton } from './copy-button';
 
 export type SetupMode = 'set_up' | 'switch' | 'enter_again';
@@ -55,10 +55,12 @@ type Refusal = { message: string; field: ConnectorAppField | null };
  */
 function useSave(serverId: string, service: string, failure: string) {
   const reload = useReloadConnectorApps(serverId);
+  const remember = useRememberChecks(serverId);
   return async (input: SaveConnectorAppInput): Promise<Refusal | null> => {
     try {
       const result = await rpc.switchServers.saveConnectorApp({ serverId, service, input });
       if (result.kind === 'refused') return { message: result.message, field: result.field };
+      remember(service, result.checks);
       await reload();
       return null;
     } catch (cause) {

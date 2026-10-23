@@ -82,7 +82,8 @@ version of their own to them without also giving them a release of their own.
   `scopes`. The dashboard's Connectors page walks Airtable's Builder Hub, with
   its redirect URL to copy and the scopes to tick, and saves only once the
   operator confirms the integration's support details are set: no check can
-  see whether it is published, so a passing one says so. A passing Google
+  see whether it is published, so a passing one says so. Saving an app
+  answers with its checks too, so the page can show them. A passing Google
   Workspace check now says it can't see the redirect URI either: Google
   compares it only when someone signs in.
 
@@ -1918,6 +1919,9 @@ version of their own to them without also giving them a release of their own.
   the operator to confirm the integration's support details are set, which no
   check can see. A server that does not send `redirect_uris`,
   `needs_public_url` and `scopes` is read as before.
+- **Saving a connector app shows what its check said.** After Check and save
+  or an updated secret, the app's page opens with the vendor's answer and any
+  note, as Check it works shows them.
 - **Connectors says why Airtable or Google Workspace can't be connected on a
   server without a public address**: the operator is told to set
   `GATEWAY_PUBLIC_URL`, and everyone else whom to ask.

@@ -22,6 +22,7 @@ import { useState } from "react";
 import {
   type ConnectorApp,
   type ConnectorAppCheck,
+  type SavedConnectorApp,
   checkConnectorApp,
   importConnectorApp,
 } from "../../data/api";
@@ -204,10 +205,10 @@ export default function ConnectorAppCard({
     else setRemoving(true);
   };
 
-  const saved = (message: string) => {
+  const saved = (message: string, result: SavedConnectorApp) => {
     setSetup(null);
     setUpdating(false);
-    setChecks(null);
+    setChecks(result.checks.length > 0 ? result.checks : null);
     onCheckFailure(null);
     onChanged(message);
   };
@@ -314,7 +315,7 @@ export default function ConnectorAppCard({
           mode={setup}
           open
           onClose={() => setSetup(null)}
-          onSaved={() => saved(`${app.name} is ready.`)}
+          onSaved={(result) => saved(`${app.name} is ready.`, result)}
         />
       )}
       {updating && (
@@ -322,7 +323,9 @@ export default function ConnectorAppCard({
           app={app}
           open
           onClose={() => setUpdating(false)}
-          onSaved={() => saved(`${app.name}'s secret is updated. Nobody was disconnected.`)}
+          onSaved={(result) =>
+            saved(`${app.name}'s secret is updated. Nobody was disconnected.`, result)
+          }
         />
       )}
       {removing && (

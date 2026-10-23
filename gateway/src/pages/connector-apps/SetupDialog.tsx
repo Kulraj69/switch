@@ -26,6 +26,7 @@ import {
   type ConnectorAppImpact,
   ConnectorAppRefusal,
   fetchConnectorAppImpact,
+  type SavedConnectorApp,
   saveConnectorApp,
 } from "../../data/api";
 import {
@@ -144,7 +145,7 @@ export default function SetupDialog({
   mode: SetupMode;
   open: boolean;
   onClose: () => void;
-  onSaved: (saved: ConnectorApp) => void;
+  onSaved: (saved: SavedConnectorApp) => void;
 }) {
   const first = mode === "switch" ? 0 : 1;
   const [step, setStep] = useState(first);

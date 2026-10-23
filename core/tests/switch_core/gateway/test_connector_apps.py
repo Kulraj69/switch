@@ -724,6 +724,8 @@ class TestAirtable:
             checked = await client.post(f"{APPS}/{AIRTABLE}/check", cookies=cookies)
         assert saved.status_code == 200, saved.text
         assert saved.json()["source"] == "saved"
+        # Saving answers what the check said, as checking it again does.
+        assert saved.json()["checks"] == checked.json()["checks"]
         assert checked.status_code == 200, checked.text
         assert checked.json()["ok"] is True
         [check] = checked.json()["checks"]
@@ -847,8 +849,11 @@ class TestCheckAndImpact:
         await world.install()
         async with world.harness.client() as client:
             cookies = cookies_for(operator)
-            await client.put(f"{APPS}/{GOOGLE}", json=_google_body(), cookies=cookies)
+            saved = await client.put(
+                f"{APPS}/{GOOGLE}", json=_google_body(), cookies=cookies
+            )
             checked = await client.post(f"{APPS}/{GOOGLE}/check", cookies=cookies)
+        assert saved.json()["checks"] == checked.json()["checks"]
         [check] = checked.json()["checks"]
         assert check["ok"] is True
         assert check["message"] == "Google Workspace accepts this client ID and secret."

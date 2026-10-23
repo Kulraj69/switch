@@ -523,7 +523,11 @@ async def save_connector_app(
         admin.id,
         details["fields_changed"],
     )
-    return await _entry(session, session_factory, apps, spec)
+    # What the vendor said, notes included, for the page to show as a check's.
+    return {
+        **await _entry(session, session_factory, apps, spec),
+        "checks": _checks_body(result),
+    }
 
 
 @router.post("/{service}/import")
