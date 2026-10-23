@@ -202,7 +202,7 @@ describe("ConnectorAppsPage", () => {
     fireEvent.change(screen.getByLabelText("Client secret"), { target: { value: "example-secret" } });
     const save = screen.getByRole("button", { name: "Check and save" }) as HTMLButtonElement;
     expect(save.disabled).toBe(true);
-    fireEvent.click(screen.getByLabelText(/support email, privacy policy URL and terms of service URL/));
+    fireEvent.click(screen.getByLabelText(/filled in its support details/));
     expect(save.disabled).toBe(false);
     fireEvent.click(save);
     await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));

@@ -424,8 +424,8 @@ export interface Confirmation {
 export function confirmBeforeCheck(app: Pick<ConnectorApp, "slug">): Confirmation | null {
   if (app.slug !== AIRTABLE) return null;
   return {
-    label: "I've set its support email, privacy policy URL and terms of service URL.",
-    why: "Until all three are set, Airtable lets only the integration's owner connect.",
+    label: "I've filled in its support details in Builder Hub.",
+    why: "Support email, privacy policy URL and terms of service URL. Until all three are set, only the integration's owner can connect.",
   };
 }
 

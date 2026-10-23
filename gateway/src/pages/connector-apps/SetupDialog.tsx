@@ -313,19 +313,23 @@ export default function SetupDialog({
               )}
               {confirmation && (
                 <FormControlLabel
+                  sx={{ alignItems: "flex-start" }}
                   control={
                     <Checkbox
+                      size="small"
                       checked={confirmed}
                       onChange={(event) => setConfirmed(event.target.checked)}
                     />
                   }
                   label={
-                    <>
-                      <Typography variant="body2">{confirmation.label}</Typography>
+                    <Box sx={{ pt: 0.75 }}>
+                      <Typography variant="body2" fontWeight={500}>
+                        {confirmation.label}
+                      </Typography>
                       <Typography variant="caption" color="text.secondary">
                         {confirmation.why}
                       </Typography>
-                    </>
+                    </Box>
                   }
                 />
               )}

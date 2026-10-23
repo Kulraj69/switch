@@ -374,7 +374,7 @@ export function ConnectorAppSetupDialog({
               </p>
             )}
             {confirmation && (
-              <label className="flex items-start gap-2 text-sm">
+              <label className="flex cursor-pointer items-start gap-2.5 pt-1">
                 <Checkbox
                   checked={confirmed}
                   disabled={busy}
@@ -382,7 +382,7 @@ export function ConnectorAppSetupDialog({
                   className="mt-0.5"
                 />
                 <span className="flex flex-col gap-0.5">
-                  <span>{confirmation.label}</span>
+                  <span className="text-sm font-medium">{confirmation.label}</span>
                   <span className="text-xs text-foreground-muted">{confirmation.why}</span>
                 </span>
               </label>
