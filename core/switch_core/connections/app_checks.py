@@ -218,7 +218,9 @@ async def check_oauth_client(
     redirect_uri: str,
 ) -> CheckResult:
     name = definition.name
-    client = OAuthClientCredentials(values.client_id, values.secrets["client_secret"])
+    client = OAuthClientCredentials(
+        values.client_id, values.secrets["client_secret"], authentication=None
+    )
     try:
         endpoints = await OAuthAdapter(
             definition, StaticClient(client), http

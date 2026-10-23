@@ -85,7 +85,11 @@ def _world(
         CATALOG,
         github_app=None,
         oauth_clients=(
-            {SERVICE: OAuthClientCredentials(STATIC_CLIENT_ID, STATIC_CLIENT_SECRET)}
+            {
+                SERVICE: OAuthClientCredentials(
+                    STATIC_CLIENT_ID, STATIC_CLIENT_SECRET, authentication=None
+                )
+            }
             if client_settings
             else {}
         ),
@@ -180,7 +184,9 @@ def _another_client(world: World, session_factory) -> OAuthAdapter:
         CATALOG,
         github_app=None,
         oauth_clients={
-            SERVICE: OAuthClientCredentials("other-client-id", "example-secret-1111")
+            SERVICE: OAuthClientCredentials(
+                "other-client-id", "example-secret-1111", authentication=None
+            )
         },
         http=world.google.client(),
         registration=ClientRegistration(

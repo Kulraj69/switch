@@ -71,7 +71,9 @@ def _adapter(
 ) -> tuple[OAuthAdapter, httpx.AsyncClient]:
     http = vendor.client()
     client = StaticClient(
-        OAuthClientCredentials(STATIC_CLIENT_ID, STATIC_CLIENT_SECRET)
+        OAuthClientCredentials(
+            STATIC_CLIENT_ID, STATIC_CLIENT_SECRET, authentication=None
+        )
     )
     return OAuthAdapter(_definition(text), client, http), http
 
@@ -249,6 +251,42 @@ class TestRefresh:
         await adapter.refresh(secret)
         assert len(vendor.token_requests) == 2
         assert not any("client_secret" in form for form in vendor.token_requests)
+
+    async def test_sends_the_secret_in_the_body_where_the_vendor_lists_that(
+        self, vendor
+    ) -> None:
+        vendor.metadata["token_endpoint_auth_methods_supported"] = [
+            "client_secret_basic",
+            "client_secret_post",
+        ]
+        adapter, _ = _adapter(vendor)
+        secret = await _sign_in(adapter, vendor)
+        await adapter.refresh(secret)
+        assert [form.get("client_secret") for form in vendor.token_requests] == [
+            STATIC_CLIENT_SECRET,
+            STATIC_CLIENT_SECRET,
+        ]
+
+    async def test_metadata_listing_no_methods_means_basic(self, vendor) -> None:
+        del vendor.metadata["token_endpoint_auth_methods_supported"]
+        adapter, _ = _adapter(vendor)
+        secret = await _sign_in(adapter, vendor)
+        await adapter.refresh(secret)
+        assert len(vendor.token_requests) == 2
+        assert not any("client_secret" in form for form in vendor.token_requests)
+
+    async def test_a_basic_secret_is_form_urlencoded(self, vendor) -> None:
+        unusual = "a+b/c:d%e f="
+        vendor.clients[STATIC_CLIENT_ID] = unusual
+        vendor.metadata["token_endpoint_auth_methods_supported"] = [
+            "client_secret_basic"
+        ]
+        client = StaticClient(
+            OAuthClientCredentials(STATIC_CLIENT_ID, unusual, authentication=None)
+        )
+        adapter = OAuthAdapter(_definition(), client, vendor.client())
+        secret = await _sign_in(adapter, vendor)
+        assert (await adapter.refresh(secret)).access_token in vendor.live_access
 
     async def test_a_reusable_refresh_token_is_kept(self) -> None:
         vendor = FakeOAuthServer(rotating=False)

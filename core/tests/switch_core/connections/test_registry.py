@@ -111,7 +111,9 @@ def test_airtable_is_set_up_by_its_operators_own_client() -> None:
     adapters = build_adapters(
         CATALOG,
         github_app=None,
-        oauth_clients={"airtable": OAuthClientCredentials("c", "SYNTHETIC")},
+        oauth_clients={
+            "airtable": OAuthClientCredentials("c", "SYNTHETIC", authentication=None)
+        },
         http=HTTP,
         registration=REG,
     )
@@ -125,7 +127,9 @@ def test_a_static_oauth_client_gets_the_generic_adapter(tmp_path: Path) -> None:
     adapters = build_adapters(
         _catalog(tmp_path, STATIC),
         github_app=None,
-        oauth_clients={"example": OAuthClientCredentials("c", "SYNTHETIC")},
+        oauth_clients={
+            "example": OAuthClientCredentials("c", "SYNTHETIC", authentication=None)
+        },
         http=HTTP,
         registration=REG,
     )
@@ -137,7 +141,9 @@ def test_a_cli_entry_gets_the_generic_adapter_with_its_client(tmp_path: Path) ->
     adapters = build_adapters(
         catalog,
         github_app=None,
-        oauth_clients={"example": OAuthClientCredentials("c", "SYNTHETIC")},
+        oauth_clients={
+            "example": OAuthClientCredentials("c", "SYNTHETIC", authentication=None)
+        },
         http=HTTP,
         registration=REG,
     )
@@ -290,7 +296,9 @@ def test_a_replaced_adapter_is_used_at_once(tmp_path: Path, session_factory) -> 
     adapter = build_adapters(
         catalog,
         github_app=None,
-        oauth_clients={"example": OAuthClientCredentials("c", "SYNTHETIC")},
+        oauth_clients={
+            "example": OAuthClientCredentials("c", "SYNTHETIC", authentication=None)
+        },
         http=HTTP,
         registration=REG,
     )["example"]

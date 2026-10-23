@@ -23,7 +23,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import httpx
 
@@ -52,6 +52,9 @@ class OAuthClientCredentials:
 
     client_id: str
     client_secret: str | None = field(repr=False)
+    # How the secret goes, where the client's registration says; None to send
+    # it as the vendor's endpoints take it.
+    authentication: ClientAuthentication | None
 
 
 @dataclass(frozen=True)
@@ -77,8 +80,10 @@ def client_fields(
     form = {"client_id": client.client_id}
     if client.client_secret is None:
         return form, {}
-    if endpoints.client_authentication == "client_secret_basic":
-        pair = f"{client.client_id}:{client.client_secret}".encode()
+    authentication = client.authentication or endpoints.client_authentication
+    if authentication == "client_secret_basic":
+        # Each half form-urlencoded first (RFC 6749 §2.3.1).
+        pair = f"{quote(client.client_id, safe='')}:{quote(client.client_secret, safe='')}".encode()
         return form, {"Authorization": f"Basic {base64.b64encode(pair).decode()}"}
     return {**form, "client_secret": client.client_secret}, {}
 
@@ -299,8 +304,11 @@ class OAuthAdapter:
         registration = metadata.get("registration_endpoint")
         revocation = metadata.get("revocation_endpoint")
         # The form body, unless the vendor takes a secret only as HTTP Basic:
-        # Airtable refuses one in the body.
-        auth_methods = metadata.get("token_endpoint_auth_methods_supported")
+        # Airtable refuses one in the body. Metadata that lists no methods
+        # means Basic (RFC 8414 §2).
+        auth_methods = metadata.get(
+            "token_endpoint_auth_methods_supported", ["client_secret_basic"]
+        )
         basic_only = (
             isinstance(auth_methods, list)
             and "client_secret_basic" in auth_methods
