@@ -40,6 +40,7 @@ const BUILT: BuiltDefinition = {
     model: 'sonnet',
     advanced_config: { effort: 'high' },
     instructions: 'Build things.',
+    auto_mode: false,
     auto_approve: false,
     directory: '/work/builder',
   },
@@ -61,7 +62,7 @@ type World = {
   /** What the machine looks like once `enable` has turned it on; null leaves it as it was. */
   lookupAfterEnable: TargetLookup | null;
   enableFails: boolean;
-  eligibility: { management: boolean; owner: string | null; ownedByMe: boolean };
+  eligibility: { management: boolean; owner: string | null; ownedByMe: boolean; gone?: true };
   stoppedByHand: boolean;
   controllerRunning: boolean[];
   failAdoptOn: string | null;
@@ -87,6 +88,9 @@ function deps(): AgentMigrationDeps {
       get: async (agentId) => (agentId === PARENT.id ? PARENT : null),
       list: async () => [PARENT],
       stoppedByHand: async () => world.stoppedByHand,
+      forget: async (agentId) => {
+        world.calls.push(`forget ${agentId}`);
+      },
     },
     definitions: {
       build: async () => BUILT,
@@ -900,6 +904,33 @@ describe('moving every agent automatically', () => {
     expect(tries()).toBe(4);
   });
 
+  it('asks again at once about agents left alone once told to recheck them all', async () => {
+    all = [PARENT];
+    world.eligibility = { management: false, owner: null, ownedByMe: false };
+    const migration = service();
+    await migration.migrateEverything();
+    expect(adopted()).toHaveLength(0);
+    expect((await migration.overview()).leftAlone).toBe(1);
+    world.eligibility = { management: true, owner: 'Ada', ownedByMe: true };
+    await migration.migrateEverything();
+    expect(adopted()).toHaveLength(0);
+    migration.recheckAll();
+    await migration.migrateEverything();
+    expect(adopted()).toHaveLength(1);
+  });
+
+  it('removes an agent its server has deleted, and moves nothing for it', async () => {
+    all = [PARENT];
+    world.eligibility = { management: true, owner: null, ownedByMe: false, gone: true };
+    const migration = service();
+    await migration.migrateEverything();
+    expect(world.calls).toContain(`forget ${PARENT.id}`);
+    expect(adopted()).toHaveLength(0);
+    const overview = await migration.overview();
+    expect(overview.leftAlone).toBe(0);
+    expect(overview.unasked).toBe(0);
+  });
+
   it('counts what it left alone and what it could not ask about', async () => {
     const base = deps().management;
     const migration = service({
@@ -973,6 +1004,73 @@ describe('moving every agent automatically', () => {
     expect(world.records.size).toBe(0);
     expect(world.calls).toContain('restore trainer');
     expect(migration.migrationProblems()[0]?.message).toMatch(/^Could not move trainer/);
+  });
+
+  it('removes a moved agent once its server has deleted it', async () => {
+    all = [PARENT];
+    const migration = service();
+    await migration.migrateEverything();
+    expect(adopted()).toEqual(['switch-1']);
+    world.calls = [];
+    world.eligibility = { management: true, owner: null, ownedByMe: false, gone: true };
+    await migration.migrateEverything();
+    expect(world.calls).toEqual([`forget ${PARENT.id}`]);
+  });
+
+  it('asks whether a moved agent still exists at most once per heal interval', async () => {
+    all = [PARENT];
+    let asked = 0;
+    const base = deps().management;
+    const migration = service({
+      management: {
+        ...base,
+        eligibility: async (workspaceId, switchAgentId) => {
+          asked++;
+          return base.eligibility(workspaceId, switchAgentId);
+        },
+      },
+    });
+    await migration.migrateEverything();
+    asked = 0;
+    await migration.migrateEverything();
+    expect(asked).toBe(1);
+    world.eligibility = { management: true, owner: null, ownedByMe: false, gone: true };
+    await migration.migrateEverything();
+    expect(asked).toBe(1);
+    expect(world.calls).not.toContain(`forget ${PARENT.id}`);
+    world.clock += 5_000;
+    await migration.migrateEverything();
+    expect(asked).toBe(2);
+    expect(world.calls).toContain(`forget ${PARENT.id}`);
+  });
+
+  it('keeps a moved agent when Switch cannot be asked whether it still exists', async () => {
+    all = [PARENT];
+    let failing = false;
+    const base = deps().management;
+    const migration = service({
+      management: {
+        ...base,
+        eligibility: async (workspaceId, switchAgentId) => {
+          if (failing) throw new Error('HTTP 502');
+          return base.eligibility(workspaceId, switchAgentId);
+        },
+      },
+    });
+    await migration.migrateEverything();
+    failing = true;
+    world.calls = [];
+    await migration.migrateEverything();
+    expect(world.calls).not.toContain(`forget ${PARENT.id}`);
+    expect(world.records.has(PARENT.id)).toBe(true);
+    expect(migration.migrationProblems()).toEqual([]);
+  });
+
+  it('removes the Console agents linked to a Switch agent deleted on their server', async () => {
+    const SAME_ID_ELSEWHERE: MigrationAgent = { ...OTHER_SERVER, switchAgentId: 'switch-2' };
+    all = [PARENT, REMOTE, SAME_ID_ELSEWHERE];
+    await service().forgetDeleted('server-1', 'switch-2');
+    expect(world.calls).toEqual([`forget ${REMOTE.id}`]);
   });
 
   it('runs one pass at a time', async () => {

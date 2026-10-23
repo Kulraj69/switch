@@ -5,10 +5,12 @@ import math
 from collections.abc import Iterable
 from typing import Annotated, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from switch_core import messaging_platforms
 from switch_core.bridges.collaboration.adapter import (
     ConfigEditRefused,
     DirectorySearchBusy,
@@ -24,6 +26,12 @@ from switch_core.bridges.collaboration.models import (
     BridgeOperationError,
     BridgeStartRefused,
     DirectoryUser,
+)
+from switch_core.bridges.collaboration.own_app_setup import (
+    SetupCheckError,
+    check_slack,
+    slack_create_url,
+    slack_manifest,
 )
 from switch_core.db.audit import AuditAction, record_audit_event
 from switch_core.db.models import (
@@ -63,6 +71,9 @@ from switch_core.gateway.schemas import (
     DirectoryUserSummary,
     ExternalUserSummary,
     IdentityClaimant,
+    SlackOwnAppSetup,
+    SlackTokensCheck,
+    SlackTokensChecked,
 )
 from switch_core.room_service import RoomService
 
@@ -245,6 +256,8 @@ async def _detail(
         ),
         attention=await _attention(bridge.id, collab_lifecycle),
         team_placement_supported=_places_app_in_teams(bridge.id, collab_lifecycle),
+        receives_webhooks=collab_lifecycle.receives_webhooks(bridge.type),
+        webhook_url=collab_lifecycle.webhook_url(bridge.id, bridge.type),
     )
 
 
@@ -255,15 +268,56 @@ async def list_bridge_types(
     ],
     _user: Annotated[User, Depends(get_current_user)],
 ) -> list[BridgeTypeInfo]:
-    return [
-        BridgeTypeInfo(
-            key=t,
-            config_schema=collab_lifecycle.get_config_schema(t),
-            channel_creation_supported=collab_lifecycle.supports_channel_creation(t),
-            directory_search_supported=collab_lifecycle.supports_directory_search(t),
+    types: list[BridgeTypeInfo] = []
+    for t in collab_lifecycle.get_registered_types():
+        platform = messaging_platforms.lookup(t)
+        adapter_cls = collab_lifecycle.adapter_class(t)
+        if platform is None or adapter_cls is None:
+            raise RuntimeError(f"Bridge type {t!r} is registered but not described.")
+        types.append(
+            BridgeTypeInfo(
+                key=t,
+                display_name=platform.display_name,
+                docs_slug=platform.docs_slug,
+                icon_svg=platform.icon_svg,
+                receives_webhooks=adapter_cls.receives_webhooks,
+                config_schema=collab_lifecycle.get_config_schema(t),
+                channel_creation_supported=adapter_cls.supports_channel_creation,
+                directory_search_supported=adapter_cls.supports_directory_search,
+            )
         )
-        for t in collab_lifecycle.get_registered_types()
-    ]
+    return types
+
+
+@router.get("/setup/slack")
+async def slack_own_app_setup(
+    _user: Annotated[User, Depends(require_tenant_admin)],
+) -> SlackOwnAppSetup:
+    """The Slack app this server needs, and Slack's create-app page filled in
+    with it, for someone connecting a Slack app of their own."""
+    manifest = slack_manifest()
+    return SlackOwnAppSetup(manifest=manifest, create_url=slack_create_url(manifest))
+
+
+@router.post("/setup/slack/check")
+async def check_slack_tokens(
+    req: SlackTokensCheck,
+    _user: Annotated[User, Depends(require_tenant_admin)],
+) -> SlackTokensChecked:
+    """Whether both tokens of a Slack app work, and the workspace they are for,
+    so nobody has to look its id up."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            checked = await check_slack(
+                http, bot_token=req.bot_token.strip(), app_token=req.app_token.strip()
+            )
+    except SetupCheckError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return SlackTokensChecked(
+        workspace_id=checked.workspace_id,
+        workspace_name=checked.workspace_name,
+        bot_name=checked.bot_name,
+    )
 
 
 @router.post("")
@@ -785,12 +839,16 @@ async def claim_bridge_identity(
     from ever being recognised by their own agents, so a second claim is
     ordinary rather than a conflict.
     """
+    # Read once: provisioning an unseen account expires everything this
+    # session holds, the caller included, and an expired row cannot be
+    # reloaded from synchronous attribute access.
+    caller_id = user.id
     bridge = await bridge_store.get(session, bridge_id)
     if bridge is None:
         raise HTTPException(status_code=404, detail="Bridge not found")
 
-    target_user_id = payload.user_id or user.id
-    if target_user_id != user.id and not is_admin:
+    target_user_id = payload.user_id or caller_id
+    if target_user_id != caller_id and not is_admin:
         raise HTTPException(
             status_code=403,
             detail="Only an admin may claim a messaging identity for another user",
@@ -851,7 +909,7 @@ async def claim_bridge_identity(
     await record_audit_event(
         session,
         tenant_id=external_user.tenant_id,
-        actor_user_id=user.id,
+        actor_user_id=caller_id,
         action=AuditAction.BRIDGE_IDENTITY_CLAIMED,
         target_type="external_user",
         target_id=external_user.id,
@@ -970,8 +1028,9 @@ async def delete_bridge(
     }
     # Not held across the deletes, which open their own sessions and call Matrix.
     await session.commit()
+    # The channels stay: the bot may already have lost its access to them.
     for room in rooms:
-        await room_service.delete_room(room.id)
+        await room_service.delete_room(room.id, retire_channel=False)
 
     await collab_lifecycle.remove(bridge_id)
     await record_audit_event(

@@ -2,6 +2,7 @@ import os
 import re
 import ssl
 import uuid
+from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path
 from typing import Literal
@@ -10,9 +11,17 @@ from urllib.parse import urlsplit
 from cryptography import x509
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from pydantic import AliasChoices, Field, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from switch_core.feature_flags import (
+    AGENT_CHATS,
+    AGENT_MANAGEMENT,
+    FOLLOW_THE_CONVERSATION,
+    HOSTED_AGENTS,
+    KNOWN_FEATURE_FLAGS,
+    SERVICE_CONNECTIONS,
+)
 from switch_core.keys import Keyring
 from switch_core.outbound import OutboundPolicy
 
@@ -70,6 +79,64 @@ def _require_matching_keypair(
             f"{certificate_name} and {key_name} are not a pair: the key does "
             "not match the certificate's public key."
         )
+
+
+# A connection catalog slug (`connections/loader.py`, SLUG_PATTERN).
+_SERVICE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+
+# The version shape the controller's package script accepts: a release's
+# x.y.z, or a dev build's x.y.z-<prerelease> (0.31.1-dev.412.gabc1234).
+_CONTROLLER_RELEASE_VERSION_RE = re.compile(
+    r"\d+\.\d+\.\d+(?:-[0-9A-Za-z]+(?:\.[0-9A-Za-z]+)*)?"
+)
+_SHA256_HEX_RE = re.compile(r"[0-9a-f]{64}")
+
+
+@dataclass(frozen=True)
+class ControllerRelease:
+    """The agents controller package every controller is told to run."""
+
+    version: str
+    url: str
+    sha256: str
+
+
+# Authorization parameters a login option may not set: the gateway's OIDC
+# client owns them, and letting configuration replace one would break the
+# flow or its protections.
+_RESERVED_OIDC_PARAMS = frozenset(
+    {
+        "client_id",
+        "redirect_uri",
+        "response_type",
+        "response_mode",
+        "scope",
+        "state",
+        "nonce",
+        "code_challenge",
+        "code_challenge_method",
+    }
+)
+
+
+class OidcLoginOption(BaseModel):
+    """One sign-in button for the gateway's OIDC provider: what it is called,
+    and the extra authorization parameters that send the person straight to
+    one way of signing in there (WorkOS: `{"provider": "GoogleOAuth"}`)."""
+
+    id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,31}$")
+    label: str = Field(min_length=1, max_length=40)
+    params: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def _no_reserved_params(self) -> "OidcLoginOption":
+        reserved = sorted(set(self.params) & _RESERVED_OIDC_PARAMS)
+        if reserved:
+            raise ValueError(
+                f"login option {self.id!r} may not set {', '.join(reserved)}: "
+                "the gateway's OIDC client sets those"
+            )
+        return self
 
 
 class SwitchConfig(BaseSettings):
@@ -158,6 +225,20 @@ class SwitchConfig(BaseSettings):
     # See `outbound.py`.
     outbound_allowed_private_hosts: str = ""
 
+    # Feature flags that are on for this deployment: comma-separated keys from
+    # `feature_flags.KNOWN_FEATURE_FLAGS`. Every other flag is off. Fixed for
+    # the life of the process; an unknown key is a startup error rather than a
+    # silently ignored typo.
+    feature_flags_enabled: str = ""
+    # Set by Switch Console on a server it runs for someone (MANAGED_BY_CONSOLE),
+    # so an agent can tell them apart from Switch Cloud and a self-hosted server.
+    managed_by_console: bool = False
+
+    # Follow the conversation (feature flag `follow_the_conversation`).
+    # How long after an agent's answer a person's next channel message still
+    # counts as a follow-up to it.
+    follow_the_conversation_window_seconds: int = Field(default=300, ge=1, le=3600)
+
     # Gateway admin seed
     gateway_admin_email: str
     gateway_admin_password: str
@@ -184,6 +265,13 @@ class SwitchConfig(BaseSettings):
     # answer.
     gateway_oidc_scopes: str | None = None
     gateway_oidc_provider_label: str | None = None
+    # The sign-in buttons offered for that provider, as JSON
+    # (`GATEWAY_OIDC_LOGIN_OPTIONS='[{"id": "google", "label": "Google",
+    # "params": {"provider": "GoogleOAuth"}}]'`). Each sends its `params` with
+    # the authorization request, so a provider that understands them (WorkOS's
+    # `provider`) goes straight to that way of signing in. Empty: one button,
+    # labelled by `gateway_oidc_provider_label`.
+    gateway_oidc_login_options: list[OidcLoginOption] = []
     # Absolute callback URL registered with the IdP. Must exactly match the
     # provider registration, e.g.
     # https://switch-gateway.<tailnet>.ts.net/gateway/auth/oidc/callback
@@ -221,13 +309,31 @@ class SwitchConfig(BaseSettings):
     # OIDC first sign-in alike), read from the users table so it holds across
     # replicas. Sign-up is refused once the count reaches this.
     gateway_signup_max_per_hour: int = Field(default=20, ge=1)
-    # How many cloud machines the bound tenant may have at once. Cloud machines
-    # run the agents controller, so they need AGENT_MANAGEMENT_ENABLED.
+    # How many cloud machines the bound tenant may have at once; 0 means this
+    # server cannot run them. The `hosted_agents` flag is what offers them.
+    # Cloud machines run the agents controller, so above 0 this needs the
+    # `agent_management` flag.
     hosted_launch_capacity: int = Field(default=0, ge=0, le=100)
     hosted_idle_stop_minutes: int = Field(default=30, ge=0, le=1440)
     hosted_disk_retention_days: int = Field(default=7, ge=1, le=90)
+    # How long a record of each service token Core issued is kept: which agent,
+    # on whose connection, through which controller, with what reach.
+    service_token_retention_days: int = Field(default=30, ge=1)
     hosted_controller_config_path: str | None = None
     hosted_github_config_path: str | None = None
+    # The GitHub App this deployment connects people's GitHub accounts through
+    # and issues repository tokens from: its JSON settings
+    # ({client_id, client_secret, slug, origin}) and the absolute path to its
+    # signing key. Both or neither. Unset, GitHub is shown as not set up here,
+    # unless the deprecated hosted settings above still name an App.
+    github_app_config_path: str | None = None
+    github_app_private_key_path: str | None = None
+    # Catalog services switched off on this server, each with the reason
+    # people are shown, as JSON: {"<slug>": "<reason>"}. An empty reason shows
+    # "Switched off on this server." A switched-off service is listed with its
+    # reason, and cannot be connected, granted or issued; disconnecting still
+    # works. Unknown slugs stop the server.
+    disabled_services: dict[str, str] = Field(default_factory=dict)
     # Sets the Secure flag on the gateway's cookies (the switch_auth session
     # and the OIDC sign-in cookie), so they are never sent over plain HTTP.
     # Only a local stack served over http:// should turn it off.
@@ -304,6 +410,18 @@ class SwitchConfig(BaseSettings):
     # (pilot, development, demo, public), not the machine.
     service_name: str = "switch-core"
     environment: str | None = None
+    # The Kubernetes pod this process runs in, from the downward API. It names
+    # the process everywhere one process has to be told from another: its
+    # lease row, the controller connections it holds, the signals it sends,
+    # its log lines and its metrics (`process_identity.py`). Unset outside
+    # Kubernetes, where the host name stands in.
+    pod_name: str | None = None
+    # How many switch-core processes the deployment runs against this
+    # database. Read for the connection budget checked at boot
+    # (`db/connection_budget.py`) and for whether a dead LISTEN connection
+    # takes this process out of service: with one replica there is no other
+    # to send traffic to, so it does not.
+    core_replicas: int = Field(default=1, ge=1)
 
     # The placeholder a log line carries when no tenant is bound at all —
     # deliberately not a tenant id, and it must not be set to one. An
@@ -364,16 +482,17 @@ class SwitchConfig(BaseSettings):
     # is false nothing is collected and no request is made.
     #
     # What is reported is fixed in `telemetry/catalogue.py` and explained in
-    # `docs/old/telemetry-events.md`: counts and durations only, never an
-    # identifier for a room, tenant, agent, user or message, and never free
-    # text. The catalogue is enforced at the boundary rather than trusted.
+    # `docs/old/telemetry-events.md`: counts, durations and values from closed
+    # sets, never an identifier for a room, tenant, agent, user or message, and
+    # never free text. The catalogue is enforced at the boundary rather than
+    # trusted.
     telemetry_enabled: bool = False
 
     # Base URL of the relay, no path — `/v1/logs` is appended, the same
     # convention `otlp_endpoint` above follows. Defaults to the company relay,
     # which is where Switch Console already reports, so one pipeline carries
     # both. Override to point a development run at a local sink.
-    telemetry_endpoint: str = "https://telemetry.flintai.dev"
+    telemetry_endpoint: str = "https://telemetry.switchagents.ai"
 
     # How long to wait on the relay before giving up on a single event.
     # Telemetry is never worth delaying real work for, and a send that is
@@ -401,6 +520,18 @@ class SwitchConfig(BaseSettings):
     # deployment never sets it. Within a deployment, staff accounts are counted
     # separately by email domain whether or not this is set.
     telemetry_internal: bool = False
+
+    # Whether agents and people may be drawn by outside avatar services. An
+    # agent with no icon of its own wears a face from api.dicebear.com seeded
+    # with its name, and a person relayed from another platform a lettered
+    # badge from ui-avatars.com with their name in the URL. Slack, Discord and
+    # Teams clients load those URLs, so the services see the name and each
+    # reader's address; the Mattermost adapter loads them from this server.
+    # False sends no such URL anywhere, stored ones included: each platform
+    # shows its own default icon, new agents get no generated icon, setting an
+    # icon on one of those services is refused, and Switch Console stops
+    # drawing them for this server's agents.
+    third_party_avatars_enabled: bool = True
 
     server_host: str = "0.0.0.0"
     server_port: int = 8000
@@ -430,6 +561,24 @@ class SwitchConfig(BaseSettings):
     # `--server` an agents controller enrolls against, which the gateway's Add
     # machine dialog shows; unset, it shows no enrollment command.
     gateway_public_url: str | None = None
+
+    # The operator dashboard's build output (the `dist/` that `npm run build`
+    # writes in gateway/). Set, and switch-core serves the dashboard on its own
+    # port beside the API, so the server has one address; the image sets it.
+    # Unset or empty, it serves no dashboard: a development run uses the Vite
+    # dev server instead. Set to a directory with no build in it is a startup
+    # error. With it set, links to the dashboard default to GATEWAY_PUBLIC_URL
+    # when FRONTEND_BASE_URL is unset (`dashboard_base_url`).
+    gateway_ui_dir: Path | None = None
+
+    @field_validator("gateway_ui_dir", mode="before")
+    @classmethod
+    def _blank_gateway_ui_dir_is_unset(cls, value: object) -> object:
+        # `GATEWAY_UI_DIR=` is how an env file or a chart turns it off, and
+        # `Path("")` would otherwise be the working directory.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     # Credentials of the distributed Slack app *we* registered — the one a
     # customer installs by clicking a button, as opposed to the app an operator
@@ -545,25 +694,14 @@ class SwitchConfig(BaseSettings):
     # move every deeplink along with it.
     messaging_public_url: str | None = None
 
-    # Switch Trust: a guardrails service that checks a message against a
-    # policy before it is sent, blocking it on a BLOCKED verdict. Base URL,
-    # no path — `/guardrails/check` (the check-only route added in
-    # https://github.com/sandbox-quantum/hoot/pull/2397) is appended, the same
-    # convention `otlp_endpoint`/`telemetry_endpoint` follow. Defaults to the
-    # company API; override for a different deployment or a local stack.
-    switch_trust_endpoint: str = "https://api.switchagents.ai"
-
-    # Authenticates with Switch Trust and names which policy to run. Both
-    # unset (the default) is what turns the whole feature off — see
-    # `trust_enabled` — and setting one without the other is a startup error,
-    # the same all-or-nothing shape as the distributed Slack/Discord app
-    # config above.
-    switch_trust_api_key: str | None = None
-    switch_trust_policy_id: str | None = None
-
-    # How long to wait on a check before giving up and letting the message
-    # through unchecked (fail open — see `trust/client.py`). Short, because
-    # this gates every message Switch sends.
+    # How long to wait on a Switch Trust check before giving up and letting the
+    # message through unchecked (fail open — see `trust/client.py`). Fixed at
+    # deploy time rather than DB-backed and admin-editable like the rest of
+    # Switch Trust's settings (`trust_settings` table,
+    # `gateway/trust_settings.py`): getting the endpoint, policy or key wrong
+    # locks guardrails out entirely, which an operator needs to fix without a
+    # restart, but a timeout is a tuning knob with a safe, short default that
+    # deserves one more step to change.
     switch_trust_timeout_seconds: float = 2.0
 
     # Upper bound on a single attachment an agent may post to a room (and that
@@ -585,11 +723,11 @@ class SwitchConfig(BaseSettings):
 
     # Every authenticated agent request resolves its bearer token against the
     # database before the handler runs, so the pool is sized against connection
-    # count rather than human traffic. An agent's heartbeat rides its socket,
-    # authenticated once, but each controller still beats over HTTP every
-    # HEARTBEAT_INTERVAL_SECONDS, less what the auth cache absorbs. Exceeding
-    # the pool does not shed load, it queues, and a queued heartbeat that
-    # misses HEARTBEAT_TTL_SECONDS costs the connection.
+    # count rather than human traffic. Agent and controller heartbeats ride
+    # their sockets, authenticated once, but an old event-stream client still
+    # beats over HTTP, and every tool call an agent makes is a request. Exceeding
+    # the pool does not shed load, it queues, and a queued request that the
+    # connection's liveness depends on can still cost it the connection.
     db_pool_size: int = 30
     db_max_overflow: int = 10
     db_pool_recycle: int = 1800
@@ -611,15 +749,21 @@ class SwitchConfig(BaseSettings):
     # controller access token's reads (its controller row, and the agent row
     # it acts as), which a revocation or binding change also drops at once.
     agent_auth_cache_ttl_seconds: float = 5.0
+    # How long a row in `agent_events` (one of an agent's own events) is kept
+    # before the retention loop deletes it. An agent that reconnects within
+    # this window resumes without a gap; one away for longer is told it missed
+    # events.
+    agent_event_retention_seconds: float = Field(default=24 * 60 * 60, gt=0)
     # Bound on the memo. One entry per distinct live token; the oldest is
     # evicted past this, so a flood of tokens cannot grow the process.
     agent_auth_cache_max_entries: int = 4096
 
-    # Agent management: managed agent definitions, the agent controllers that
-    # run them, and the controller-facing routes under /v1/management and
-    # /v1/controllers. Off by default; with it off none of those routes are
-    # mounted and the bearer middleware never treats a token as a controller's.
-    agent_management_enabled: bool = False
+    # AGENT_MANAGEMENT_ENABLED, replaced by the `agent_management` feature flag.
+    # Read only to refuse a deployment that still turns it on, which would
+    # otherwise lose agent management without a word.
+    legacy_agent_management_enabled: bool | None = Field(
+        default=None, validation_alias="agent_management_enabled"
+    )
     # Signs controller access tokens. Required (at least 32 characters) when
     # agent management is on, and deliberately separate from SECRET_KEYS so
     # rotating one never invalidates the other.
@@ -628,6 +772,15 @@ class SwitchConfig(BaseSettings):
     # `report_within_s`; a controller that has not reported for three of these
     # is shown as unknown and refused new placements.
     controller_status_interval_seconds: int = 60
+    # The agents controller release every controller is told to run, in
+    # answer to its status report. Set all three or none: with none, no
+    # controller is told anything and each keeps the version it has. A
+    # controller downloads the package from the URL, refuses it unless its
+    # SHA-256 matches, and installs it once no agent session is running.
+    # Switch Console's own controller is told nothing: it updates with Console.
+    controller_release_version: str | None = None
+    controller_release_url: str | None = None
+    controller_release_sha256: str | None = None
     # Share one read of a room's new messages between every client in it
     # (`transport/room_cache.py`). Without it, a room of N agents reads each
     # new page N times, which is what exhausted the pool in a restart burst.
@@ -734,17 +887,24 @@ class SwitchConfig(BaseSettings):
                 "CONTROLLER_STATUS_INTERVAL_SECONDS must be at least 1, got "
                 f"{self.controller_status_interval_seconds!r}."
             )
+        if self.legacy_agent_management_enabled:
+            raise ValueError(
+                "AGENT_MANAGEMENT_ENABLED has been replaced by a feature flag: "
+                f"remove it and add {AGENT_MANAGEMENT!r} to FEATURE_FLAGS_ENABLED."
+            )
         if not self.agent_management_enabled:
             if self.hosted_launch_capacity > 0:
                 raise ValueError(
-                    "HOSTED_LAUNCH_CAPACITY needs AGENT_MANAGEMENT_ENABLED: cloud "
-                    "machines run the agents controller."
+                    "HOSTED_LAUNCH_CAPACITY needs the "
+                    f"{AGENT_MANAGEMENT!r} feature flag: cloud machines run the "
+                    "agents controller."
                 )
             return self
         if not self.controller_token_secret:
             raise ValueError(
-                "CONTROLLER_TOKEN_SECRET is required when AGENT_MANAGEMENT_ENABLED "
-                "is true: it signs the access tokens agent controllers use."
+                "CONTROLLER_TOKEN_SECRET is required when the "
+                f"{AGENT_MANAGEMENT!r} feature flag is on: it signs the access "
+                "tokens agent controllers use."
             )
         if len(self.controller_token_secret) < 32:
             raise ValueError(
@@ -752,6 +912,57 @@ class SwitchConfig(BaseSettings):
                 f"{len(self.controller_token_secret)}."
             )
         return self
+
+    @model_validator(mode="after")
+    def _validate_controller_release(self) -> "SwitchConfig":
+        settings = {
+            "CONTROLLER_RELEASE_VERSION": self.controller_release_version,
+            "CONTROLLER_RELEASE_URL": self.controller_release_url,
+            "CONTROLLER_RELEASE_SHA256": self.controller_release_sha256,
+        }
+        given = sorted(name for name, value in settings.items() if value)
+        if not given:
+            return self
+        if len(given) != len(settings):
+            missing = sorted(set(settings) - set(given))
+            raise ValueError(
+                "The controller release is set all together or not at all: "
+                f"{', '.join(given)} is set but {', '.join(missing)} is not."
+            )
+        version = self.controller_release_version or ""
+        if not _CONTROLLER_RELEASE_VERSION_RE.fullmatch(version):
+            raise ValueError(
+                "CONTROLLER_RELEASE_VERSION must be x.y.z or x.y.z-<prerelease>, got "
+                f"{version!r}."
+            )
+        url = self.controller_release_url or ""
+        parts = urlsplit(url)
+        if parts.scheme != "https" or not parts.netloc or url != url.strip():
+            raise ValueError(
+                f"CONTROLLER_RELEASE_URL must be an https URL with a host, got {url!r}."
+            )
+        sha256 = self.controller_release_sha256 or ""
+        if not _SHA256_HEX_RE.fullmatch(sha256):
+            raise ValueError(
+                "CONTROLLER_RELEASE_SHA256 must be 64 lowercase hex characters, "
+                f"got {sha256!r}."
+            )
+        return self
+
+    @property
+    def controller_release(self) -> ControllerRelease | None:
+        """The release controllers are told to run, or None when not set."""
+        if not (
+            self.controller_release_version
+            and self.controller_release_url
+            and self.controller_release_sha256
+        ):
+            return None
+        return ControllerRelease(
+            version=self.controller_release_version,
+            url=self.controller_release_url,
+            sha256=self.controller_release_sha256,
+        )
 
     @model_validator(mode="after")
     def _validate_logging(self) -> "SwitchConfig":
@@ -944,6 +1155,29 @@ class SwitchConfig(BaseSettings):
     def invite_email_enabled(self) -> bool:
         return bool(self.gateway_smtp_host)
 
+    @property
+    def dashboard_base_url(self) -> str | None:
+        """The origin links to the dashboard are built on.
+
+        FRONTEND_BASE_URL when set. Otherwise, when switch-core serves the
+        dashboard: the host browser sign-in returns to, where one is
+        configured, because a sign-in begun anywhere is sent there and leaves
+        its session there; and the server's own origin failing that. On a
+        server with one address the two are the same host. Not where a sign-in
+        lands, which stays on the host that set the session cookie unless
+        FRONTEND_BASE_URL names another.
+        """
+        if self.frontend_base_url:
+            return self.frontend_base_url
+        if self.gateway_ui_dir is None:
+            return None
+        if self.gateway_oidc_enabled and self.gateway_oidc_redirect_url:
+            callback = urlsplit(self.gateway_oidc_redirect_url)
+            return f"{callback.scheme}://{callback.netloc}"
+        if self.gateway_public_url:
+            return self.gateway_public_url.rstrip("/")
+        return None
+
     @model_validator(mode="after")
     def _validate_smtp(self) -> "SwitchConfig":
         if self.gateway_invite_emails_per_day < 1:
@@ -963,7 +1197,7 @@ class SwitchConfig(BaseSettings):
                 "GATEWAY_SMTP_FROM is required when GATEWAY_SMTP_HOST is set: "
                 "it is the address invitation e-mails are sent from."
             )
-        if not self.frontend_base_url:
+        if not self.dashboard_base_url:
             raise ValueError(
                 "FRONTEND_BASE_URL is required when GATEWAY_SMTP_HOST is set: "
                 "invitation e-mails link to the dashboard at that origin."
@@ -990,6 +1224,15 @@ class SwitchConfig(BaseSettings):
         return Keyring.parse(self.secret_keys, legacy_secret=self.jwt_secret_key)
 
     @model_validator(mode="after")
+    def _validate_switch_trust_timeout(self) -> "SwitchConfig":
+        if self.switch_trust_timeout_seconds <= 0:
+            raise ValueError(
+                "SWITCH_TRUST_TIMEOUT_SECONDS must be positive, got "
+                f"{self.switch_trust_timeout_seconds!r}."
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_oauth_audience(self) -> "SwitchConfig":
         if self.oauth_issuer_url and not self.oauth_audience:
             raise ValueError(
@@ -1008,6 +1251,47 @@ class SwitchConfig(BaseSettings):
                 "on a deployment that does not isolate them from each other."
             )
         return self
+
+    @model_validator(mode="after")
+    def _validate_feature_flags_enabled(self) -> "SwitchConfig":
+        unknown = sorted(self._enabled_feature_flags() - KNOWN_FEATURE_FLAGS)
+        if unknown:
+            raise ValueError(
+                f"FEATURE_FLAGS_ENABLED names unknown feature flag(s): {unknown}. "
+                f"Known flags: {sorted(KNOWN_FEATURE_FLAGS)}."
+            )
+        return self
+
+    def _enabled_feature_flags(self) -> set[str]:
+        return {
+            key.strip() for key in self.feature_flags_enabled.split(",") if key.strip()
+        }
+
+    @property
+    def feature_flags(self) -> dict[str, bool]:
+        """Every known flag and whether this deployment turned it on."""
+        enabled = self._enabled_feature_flags()
+        return {key: key in enabled for key in sorted(KNOWN_FEATURE_FLAGS)}
+
+    @property
+    def agent_management_enabled(self) -> bool:
+        return self.feature_flags[AGENT_MANAGEMENT]
+
+    @property
+    def hosted_agents_enabled(self) -> bool:
+        return self.feature_flags[HOSTED_AGENTS]
+
+    @property
+    def service_connections_enabled(self) -> bool:
+        return self.feature_flags[SERVICE_CONNECTIONS]
+
+    @property
+    def follow_the_conversation_enabled(self) -> bool:
+        return self.feature_flags[FOLLOW_THE_CONVERSATION]
+
+    @property
+    def agent_chats_enabled(self) -> bool:
+        return self.feature_flags[AGENT_CHATS]
 
     @model_validator(mode="after")
     def _validate_outbound_allowed_private_hosts(self) -> "SwitchConfig":
@@ -1045,6 +1329,36 @@ class SwitchConfig(BaseSettings):
                 "interval such as '15s', '500ms' or a bare count of "
                 f"milliseconds, got {value!r}."
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_github_app(self) -> "SwitchConfig":
+        if (self.github_app_config_path is None) != (
+            self.github_app_private_key_path is None
+        ):
+            raise ValueError(
+                "GITHUB_APP_CONFIG_PATH and GITHUB_APP_PRIVATE_KEY_PATH are set "
+                "together or not at all."
+            )
+        if (
+            self.github_app_private_key_path is not None
+            and not Path(self.github_app_private_key_path).is_absolute()
+        ):
+            raise ValueError("GITHUB_APP_PRIVATE_KEY_PATH must be an absolute path.")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_disabled_services(self) -> "SwitchConfig":
+        for slug, reason in self.disabled_services.items():
+            if not _SERVICE_SLUG_RE.fullmatch(slug):
+                raise ValueError(
+                    f"DISABLED_SERVICES names an invalid service: {slug!r}"
+                )
+            if len(reason) > 300 or "\n" in reason:
+                raise ValueError(
+                    f"DISABLED_SERVICES' reason for {slug} must be one line of at "
+                    "most 300 characters."
+                )
         return self
 
     @model_validator(mode="after")
@@ -1208,56 +1522,6 @@ class SwitchConfig(BaseSettings):
                 "the app."
             )
         return self
-
-    @model_validator(mode="after")
-    def _validate_switch_trust(self) -> "SwitchConfig":
-        required = (self.switch_trust_api_key, self.switch_trust_policy_id)
-        set_count = sum(1 for value in required if value)
-        if 0 < set_count < len(required):
-            raise ValueError(
-                "Partial Switch Trust config: set both SWITCH_TRUST_API_KEY "
-                "and SWITCH_TRUST_POLICY_ID, or neither."
-            )
-        if self.switch_trust_endpoint != self.switch_trust_endpoint.strip():
-            raise ValueError(
-                "SWITCH_TRUST_ENDPOINT has leading or trailing whitespace: "
-                f"{self.switch_trust_endpoint!r}."
-            )
-        endpoint = urlsplit(self.switch_trust_endpoint)
-        if endpoint.scheme not in ("http", "https"):
-            raise ValueError(
-                "SWITCH_TRUST_ENDPOINT must be an http(s) URL, got "
-                f"{self.switch_trust_endpoint!r}."
-            )
-        if not endpoint.netloc:
-            raise ValueError(
-                "SWITCH_TRUST_ENDPOINT must include a host, got "
-                f"{self.switch_trust_endpoint!r}."
-            )
-        if endpoint.path.strip("/"):
-            raise ValueError(
-                "SWITCH_TRUST_ENDPOINT is the service's base URL and "
-                "/guardrails/check is appended to it, so it must have no path "
-                f"of its own. Got {self.switch_trust_endpoint!r} — drop the "
-                f"{endpoint.path!r}."
-            )
-        if endpoint.query or endpoint.fragment:
-            raise ValueError(
-                "SWITCH_TRUST_ENDPOINT must be a bare base URL: a query or "
-                "fragment is dropped when /guardrails/check is appended, so "
-                f"it would silently never be sent. Got "
-                f"{self.switch_trust_endpoint!r}."
-            )
-        if self.switch_trust_timeout_seconds <= 0:
-            raise ValueError(
-                "SWITCH_TRUST_TIMEOUT_SECONDS must be positive, got "
-                f"{self.switch_trust_timeout_seconds!r}."
-            )
-        return self
-
-    @property
-    def trust_enabled(self) -> bool:
-        return bool(self.switch_trust_api_key and self.switch_trust_policy_id)
 
     @model_validator(mode="after")
     def _validate_teams_app(self) -> "SwitchConfig":

@@ -20,22 +20,42 @@ vi.mock('@renderer/lib/ipc', () => ({
   rpc: { workspaces: { listBridges: async () => [] } },
 }));
 
+const managed = vi.hoisted(() => ({ data: undefined as unknown[] | undefined }));
+
 vi.mock('@renderer/features/locations/stores/agents-store', () => ({
-  agentsStore: { loaded: true, load: async () => {}, agentsOnServer: () => [{}, {}] },
+  agentsStore: {
+    loaded: true,
+    load: async () => {},
+    agentsOnServer: () => [{ switchAgentId: 'a' }, { switchAgentId: 'b' }],
+  },
 }));
 
+vi.mock('@renderer/features/managed-agents/use-managed-agents', async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  useManagedAgents: () => ({ data: managed.data, isLoading: false }),
+}));
+
+const roomsData = vi.hoisted(() => ({ rooms: [] as unknown[] }));
+
 vi.mock('@renderer/features/switch-servers/switch-rooms-store', () => ({
-  switchRoomsStore: { workspacesNotSignedIn: [], readableRoomsInWorkspace: () => [] },
+  switchRoomsStore: { workspacesNotSignedIn: [], readableRoomsInWorkspace: () => roomsData.rooms },
 }));
 
 vi.mock('@renderer/features/workspaces/workspaces-store', () => ({
   workspacesStore: {
     idOnServerInScope: (serverId: string | null) => (serverId === 'server' ? 'workspace' : null),
+    serverIdFor: (workspaceId: string) => (workspaceId === 'workspace' ? 'server' : null),
   },
 }));
 
 vi.mock('@renderer/features/switch-servers/switch-servers-store', () => ({
   switchServersStore: { servers: [], statusFor: () => null },
+}));
+
+const featureFlags = vi.hoisted(() => ({ agent_chats: false }));
+
+vi.mock('@renderer/lib/hooks/useFeatureFlags', () => ({
+  useFeatureFlags: () => featureFlags,
 }));
 
 import { ServerStatTiles } from '@renderer/features/switch-servers/server-stat-tiles';
@@ -44,6 +64,9 @@ let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
 beforeEach(() => {
+  managed.data = undefined;
+  roomsData.rooms = [];
+  featureFlags.agent_chats = false;
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
 });
 
@@ -77,7 +100,27 @@ function agentsTile(el: HTMLElement): HTMLElement {
   return [...el.querySelectorAll('p')].find((p) => p.textContent === 'Your Agents')!.parentElement!;
 }
 
+function roomsTile(el: HTMLElement): HTMLElement {
+  return [...el.querySelectorAll('p')].find((p) => p.textContent === 'Your Rooms')!.parentElement!;
+}
+
 it('counts the agents onboarded on the server', async () => {
   const tile = agentsTile(await render());
   expect(tile.querySelectorAll('p')[1].textContent).toBe('2');
+});
+
+it('counts the agents the server runs too, once each, as the Your Agents page lists them', async () => {
+  managed.data = [{ agentId: 'b' }, { agentId: 'c' }, { agentId: 'd' }];
+  const tile = agentsTile(await render());
+  expect(tile.querySelectorAll('p')[1].textContent).toBe('4');
+});
+
+it('hides 1-1 chats when agent_chats flag is on', async () => {
+  roomsData.rooms = [
+    { channelType: 'direct', bridgeType: null, agentCount: 1 },
+    { channelType: 'group', bridgeType: null, agentCount: 2 },
+  ];
+  featureFlags.agent_chats = true;
+  const tile = roomsTile(await render());
+  expect(tile.querySelectorAll('p')[1].textContent).toBe('1');
 });

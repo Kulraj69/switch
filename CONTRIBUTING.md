@@ -69,11 +69,26 @@ Run `just` with no arguments to list every recipe. The most-used ones:
 | `switch-expert/` | Instructions and knowledge for an agent that answers questions about Switch |
 | `justfile` | Repo-root task runner (drives all code trees) |
 
-[`docs/old/ARCHITECTURE.md`](docs/old/ARCHITECTURE.md) describes the service's internal
-module structure and the key request flows.
+[`docs/official/internals/`](docs/official/internals/index.md) explains how Switch
+works. [`docs/old/ARCHITECTURE.md`](docs/old/ARCHITECTURE.md) is an older overview from
+when Switch ran on Matrix, and much of it is out of date.
 [`docs/old/GATEWAY_OIDC_SETUP.md`](docs/old/GATEWAY_OIDC_SETUP.md) covers
 setting up bring-your-own OIDC sign-in for the gateway, including the WorkOS
 setup path.
+
+## Adding an agent CLI
+
+Start with [Adding support for a new agent CLI](console/docs/new-agent-cli.md):
+the steps in order, and what your pull request has to show (a real-CLI test
+summary and a short video). The technical details are in
+[Add an agent provider](console/docs/add-an-agent-provider.md).
+
+## Adding a messaging platform
+
+Start with [Adding support for a new messaging platform](docs/contributing/new-messaging-platform.md):
+the steps in order, and what your pull request has to show (your adapter's
+test summary and a short video). The technical details are in
+[Add a messaging platform](docs/contributing/add-a-messaging-platform.md).
 
 ## Testing
 

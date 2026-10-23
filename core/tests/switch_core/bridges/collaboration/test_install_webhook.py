@@ -27,7 +27,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, ClassVar
 from urllib.parse import urlencode
 
 import httpx
@@ -36,7 +36,7 @@ from fastapi import FastAPI
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from switch_core.bridges.collaboration.adapter import PlatformAdapter
+from switch_core.bridges.collaboration.adapter import AgentIdentity, PlatformAdapter
 from switch_core.bridges.collaboration.install import (
     MessagingInstallerRegistry,
     commands_path,
@@ -97,6 +97,8 @@ class _SocketOnlyAdapter(PlatformAdapter):
     about.
     """
 
+    display_name: ClassVar[str] = "Stub"
+
     def __init__(self) -> None: ...
 
     async def start(self, *a: Any, **k: Any) -> Any: ...
@@ -110,8 +112,8 @@ class _SocketOnlyAdapter(PlatformAdapter):
     async def get_channel_agent_names(self, *a: Any, **k: Any) -> Any: ...
     async def add_agents_to_channel(self, *a: Any, **k: Any) -> Any: ...
     async def add_users_to_channel(self, *a: Any, **k: Any) -> Any: ...
-    async def create_agent_identity(self, *a: Any, **k: Any) -> Any: ...
-    async def remove_agent_identity(self, *a: Any, **k: Any) -> Any: ...
+    async def create_agent_identity(self, agent: AgentIdentity) -> None: ...
+    async def remove_agent_identity(self, agent: AgentIdentity) -> None: ...
     def translate_inbound(self, *a: Any, **k: Any) -> Any: ...
     def _render_outbound(self, *a: Any, **k: Any) -> Any: ...
 

@@ -1,4 +1,4 @@
-import { Bot, ExternalLink, MoreVertical, Plug, Plus, RotateCcw, Trash2 } from 'lucide-react';
+import { Bot, ExternalLink, MoreVertical, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { observer } from 'mobx-react-lite';
 import { useEffect } from 'react';
 import type { GuardResult, ViewDefinition } from '@renderer/app/view-registry';
@@ -12,6 +12,7 @@ import {
   managedAgentState,
 } from '@renderer/features/managed-agents/managed-agent-state';
 import {
+  useMachineLabel,
   useManagedAgents,
   withoutManaged,
 } from '@renderer/features/managed-agents/use-managed-agents';
@@ -36,6 +37,8 @@ import {
 import type { Agent } from '@shared/core/agents/agents';
 import type { ManagedAgentView } from '@shared/core/managed-agents/managed-agents';
 import { providerDisplayName } from '@shared/core/providers/agent-provider-registry';
+import { isFrozenServer } from './managed-server-state';
+import { openServerPage } from './open-server-page';
 import { ServerPage } from './server-page';
 import { ServerSectionTitlebar } from './server-section-titlebar';
 import { switchRoomsStore } from './switch-rooms-store';
@@ -53,7 +56,6 @@ const ServerAgentsPanel = observer(function ServerAgentsPanel() {
   const serverId = useServerId();
   const server = switchServersStore.servers.find((s) => s.id === serverId);
   const showAddAgentModal = useShowModal('addAgentModal');
-  const showConnectionsModal = useShowModal('connectionsModal');
 
   // The sidebar reads the same two things, but this page must not be right only
   // when the sidebar happened to be open first.
@@ -70,14 +72,6 @@ const ServerAgentsPanel = observer(function ServerAgentsPanel() {
       width={880}
       title="Your Agents"
       description={`Agents on ${server?.name ?? 'this server'}. Add one, set how it is addressed, and start sessions.`}
-      action={
-        machines.data && (
-          <Button variant="outline" size="sm" onClick={() => showConnectionsModal({ serverId })}>
-            <Plug className="size-4" />
-            Connections
-          </Button>
-        )
-      }
     >
       {machines.data
         ?.filter((machine) => machine.state !== 'deleted')
@@ -113,7 +107,7 @@ const ServerAgentsPanel = observer(function ServerAgentsPanel() {
           <ManagedAgentCard key={agent.agentId} agent={agent} />
         ))}
       </div>
-      {managed.error && (
+      {managed.error && !(server && isFrozenServer(server)) && (
         <p role="alert" className="mt-3 text-sm text-destructive">
           {failureText(managed.error, 'Could not load managed agents.')}
         </p>
@@ -128,6 +122,7 @@ function ManagedAgentCard({ agent }: { agent: ManagedAgentView }) {
   const label = managedAgentLabel(agent);
   const state = managedAgentState(agent);
   const provider = providerDisplayName(agent.definition.provider) ?? agent.definition.provider;
+  const machine = useMachineLabel(agent);
   return (
     <div className="group relative flex min-h-[184px] flex-col rounded-[11px] bg-[var(--surface-2)] transition-colors hover:bg-[var(--fill)]">
       <button
@@ -144,12 +139,12 @@ function ManagedAgentCard({ agent }: { agent: ManagedAgentView }) {
       />
       <div className="pointer-events-none flex flex-1 flex-col p-[14px]">
         <div className="flex flex-1 items-center justify-center py-3">
-          <AgentAvatar name={label} iconUrl={agent.iconUrl} size={66} />
+          <AgentAvatar name={label} iconUrl={agent.iconUrl} serverId={agent.serverId} size={66} />
         </div>
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-foreground">{label}</div>
           <div className="truncate text-xs text-foreground-muted">
-            {provider} · {agent.machine?.name ?? 'no machine'}
+            {provider} · {machine ?? 'no machine'}
           </div>
         </div>
       </div>
@@ -198,7 +193,7 @@ const AgentCard = observer(function AgentCard({
 
       <div className="pointer-events-none flex flex-1 flex-col p-[14px]">
         <div className="flex flex-1 items-center justify-center py-3">
-          <AgentAvatar name={label} iconUrl={iconUrl} size={66} />
+          <AgentAvatar name={label} iconUrl={iconUrl} serverId={serverId} size={66} />
         </div>
         <div className="min-w-0">
           <div className="truncate text-sm font-medium text-foreground">{label}</div>
@@ -232,11 +227,7 @@ const AgentCard = observer(function AgentCard({
           />
           <DropdownMenuContent align="end">
             {gatewayUrl && (
-              <DropdownMenuItem
-                onClick={() =>
-                  void rpc.switchServers.openGatewayPage({ serverId, url: gatewayUrl })
-                }
-              >
+              <DropdownMenuItem onClick={() => void openServerPage(serverId, gatewayUrl)}>
                 <ExternalLink className="size-4" />
                 Open in gateway
               </DropdownMenuItem>

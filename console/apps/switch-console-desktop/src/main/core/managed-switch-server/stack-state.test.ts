@@ -37,6 +37,7 @@ const secrets: LocalServerSecrets = {
   agentRegistrationToken: 'agent-token',
   jwtSecretKey: 'jwt-key',
   secretKeys: 'console:secret-keys-value',
+  controllerTokenSecret: 'controller-token-secret-value',
   gatewayAdminPassword: 'gw-admin',
   mattermostAdminPassword: 'mm-admin',
   mattermostUserPassword: 'mm-user',
@@ -53,6 +54,7 @@ function envFor(overrides: Partial<LocalServerSecrets> = {}, version = '0.27.0')
     telemetryEnabled: false,
     telemetryEnvironment: 'prod',
     telemetryInternal: false,
+    telemetryEndpoint: 'https://relay.example.test',
   });
 }
 

@@ -40,17 +40,47 @@ export function sameApiEndpoint(a: string, b: string): boolean {
   return a.trim().replace(/\/+$/, '') === b.trim().replace(/\/+$/, '');
 }
 
+/**
+ * One spelling per server address, so two that name the same server compare
+ * equal: scheme and host lowercased, a default port dropped, no trailing slash,
+ * a path kept. Input that does not parse is only trimmed.
+ */
+export function normaliseServerUrl(url: string): string {
+  const trimmed = url.trim();
+  try {
+    const parsed = new URL(trimmed);
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`.replace(/\/+$/, '');
+  } catch {
+    return trimmed.replace(/\/+$/, '');
+  }
+}
+
+/** Where a server's dashboard pages open: its own address, unless it still
+ * keeps the dashboard elsewhere. */
+export function dashboardOrigin(server: Pick<SwitchServer, 'url' | 'dashboardUrl'>): string {
+  return server.dashboardUrl ?? server.url;
+}
+
 /** A registered Switch server. Non-secret connection metadata only. */
 export type SwitchServer = {
   id: string;
   name: string;
-  /** Origin of the gateway deployment, e.g. `https://switch-gateway.example.com`.
-   * The management API lives under `${gatewayUrl}/gateway`. */
-  gatewayUrl: string;
-  /** Origin of the Switch core (agent bridge) API, e.g.
-   * `https://switch-api.example.com` — what an agent's `SWITCH_API_ENDPOINT`
-   * points at, and what an onboarded agent is matched to its server by. */
-  apiUrl: string;
+  /** The server's one address, e.g. `https://switch.example.com`: the origin
+   * of switch-core, which serves the agent API at its root, the management API
+   * under `${url}/gateway`, and the dashboard. What an agent's
+   * `SWITCH_API_ENDPOINT` points at, and what an onboarded agent is matched to
+   * its server by. */
+  url: string;
+  /** Where the dashboard opens when `url` does not serve it, else null. Open
+   * dashboard pages through {@link dashboardOrigin}, never from this directly.
+   *
+   * A fallback with an end date. A server older than switch-core serving its
+   * own dashboard keeps the gateway address it was registered with (migration
+   * 0052), cleared once its `url` answers with the dashboard; a managed stack
+   * gets its dashboard container's port while the compose it runs still has
+   * one. Remove it once Console no longer supports servers that predate the
+   * built-in dashboard and the bundled compose no longer runs the container. */
+  dashboardUrl: string | null;
   /** True when Switch Console runs this server itself (docker compose). Managed
    * servers are driven by the lifecycle controls, not the add/edit-server UI. */
   managed: boolean;
@@ -65,10 +95,30 @@ export type SwitchServer = {
   updatedAt: string;
 };
 
+/**
+ * Whether Switch Console runs this server on this computer. Its stack listens
+ * on loopback only, so nobody on another computer can reach it, and an
+ * invitation would hand them a link to this machine's `localhost`. A server
+ * Console runs on an SSH host is not one: other Consoles with access to that
+ * host open the same stack.
+ */
+export function runsOnThisComputer(
+  server: Pick<SwitchServer, 'managed' | 'managementKind'>
+): boolean {
+  return server.managed && server.managementKind !== 'remote';
+}
+
 export type AddServerParams = {
   name: string;
-  gatewayUrl: string;
-  apiUrl: string;
+  url: string;
+};
+
+/** What a managed stack registers itself with: its own address, and where its
+ * dashboard container answers while it still runs one. */
+export type ManagedServerParams = {
+  name: string;
+  url: string;
+  dashboardUrl: string | null;
 };
 
 /** Identifies which managed server to upsert/look up: the single local stack,
@@ -78,8 +128,7 @@ export type ManagedServerRef = { kind: 'local' } | { kind: 'remote'; sshHost: st
 export type UpdateServerParams = {
   id: string;
   name: string;
-  gatewayUrl: string;
-  apiUrl: string;
+  url: string;
 };
 
 /** Rename a server (display name only). Works for managed and external servers;
@@ -90,7 +139,7 @@ export type RenameServerParams = {
 };
 
 /**
- * What happened to one agent when a server's API URL was cascaded to its
+ * What happened to one agent when a server's address was cascaded to its
  * members. `updated` — the agent's `SWITCH_API_ENDPOINT` was rewritten.
  * `not-provisioned` — the agent has no Switch credentials on disk yet, so there
  * was nothing to update (skipped, not an error). `failed` — the rewrite threw
@@ -98,7 +147,7 @@ export type RenameServerParams = {
  */
 export type AgentApiUrlPropagationOutcome = 'updated' | 'not-provisioned' | 'failed';
 
-/** Per-agent result of a server-API-URL cascade. */
+/** Per-agent result of a server-address cascade. */
 export type AgentApiUrlPropagation = {
   agentId: string;
   agentName: string;
@@ -109,11 +158,11 @@ export type AgentApiUrlPropagation = {
   error?: string;
 };
 
-/** Summary of cascading a server's API-URL edit to its member agents. */
+/** Summary of cascading a server's address edit to its member agents. */
 export type ServerApiUrlPropagation = {
-  /** True when the API URL actually changed, so propagation ran. When false the
-   * `agents` list is empty (the edit was name/gateway-only). */
-  apiUrlChanged: boolean;
+  /** True when the address actually changed, so propagation ran. When false the
+   * `agents` list is empty (the edit was name-only). */
+  urlChanged: boolean;
   agents: AgentApiUrlPropagation[];
 };
 
@@ -130,6 +179,11 @@ export type SwitchAuthConfig = {
   oidcEnabled: boolean;
   /** Button label for the OIDC provider (e.g. "Okta"), or null. */
   oidcProviderLabel: string | null;
+  /** One sign-in button each (Google, GitHub…); empty for one button labelled as above. */
+  oidcLoginOptions: { id: string; label: string }[];
+  /** Whether the server can hand a sign-in back to this computer, so the
+   * system browser can be used; false for a server predating it. */
+  oidcBrowserHandoff: boolean;
   /** Whether anyone may create an account with an email and password. False
    * for a server predating the field. */
   signupEnabled: boolean;
@@ -227,6 +281,19 @@ export type RemoteAgentSummary = {
 };
 
 /**
+ * What a rename did (`PUT /agents/{id}/name`): the agent as the server now
+ * holds it, the name it had, each chat platform that could not be updated yet
+ * (the rename stands; the platform catches up when its bridge next starts),
+ * and saved templates whose text still names the old name.
+ */
+export type AgentRenameOutcome = {
+  agent: RemoteAgentSummary;
+  oldName: string;
+  bridgeFailures: string[];
+  templatesMentioningOldName: string[];
+};
+
+/**
  * What came of giving this user's icon-less agents their generated avatar
  * (CHOO-2171).
  *
@@ -239,7 +306,10 @@ export type AgentIconBackfill =
   | { kind: 'written'; written: number }
   /** The server has no agent-icon endpoint — it predates the feature. */
   | { kind: 'unsupported' }
-  | { kind: 'partial'; written: number; failed: number };
+  | { kind: 'partial'; written: number; failed: number }
+  /** The server disables third-party avatars, so nothing was generated or
+   * written — by the operator's own choice, not a failure. */
+  | { kind: 'disabled' };
 
 /** Read-only summary of a remote room (mirrors the gateway `RoomSummary`). */
 export type RemoteRoomSummary = {
@@ -281,6 +351,25 @@ export type RemoteRoomDetail = RemoteRoomSummary & {
   /** Display names of the people in the room, via the messaging app it is
    * bridged to. Empty for an unbridged room, which has no people in it. */
   connectedUserNames: string[];
+  /** What deleting the room does to its platform channel when the person asks
+   * for it to be retired (it is kept otherwise); null when it has none.
+   * Undefined from a server that predates the field, which says nothing about
+   * the channel either way. */
+  channelOnDelete?: ChannelRetirement | null;
+};
+
+/** What deleting a room does to its platform channel when asked to retire it
+ * and all goes to plan (mirrors the gateway's `ChannelRetirement`): archived on Slack and
+ * Mattermost, deleted on Discord, left by the bot on Telegram, and kept on
+ * Teams, where Switch may not remove it. */
+export type ChannelRetirement = 'archived' | 'deleted' | 'left' | 'kept';
+
+/** What deleting a room did to its platform channel when asked to retire it
+ * (mirrors the gateway's `RetireOutcome`). `failed` means the channel is still there and someone has
+ * to remove it by hand; `reason` says why. */
+export type RetireOutcome = {
+  outcome: ChannelRetirement | 'failed';
+  reason: string | null;
 };
 
 /** The room fields Switch Console can change. Anything omitted is left alone;
@@ -384,6 +473,12 @@ export type RemoteBridge = {
    * Null on a server predating the field.
    */
   channelIdsRefused: string | null;
+  /** Whether this connection receives its platform's events on an address of
+   * its own, which the operator has to give the platform. */
+  receivesWebhooks: boolean;
+  /** That address, or null where the connection takes none or the server has
+   * no public origin configured (`MESSAGING_PUBLIC_URL`) to build it from. */
+  webhookUrl: string | null;
 };
 
 /**
@@ -485,6 +580,18 @@ export type BridgeConfigField = {
 export type RemoteBridgeType = {
   /** Platform key (`slack`, `mattermost`, …). */
   key: string;
+  /** How a person names the platform ("Microsoft Teams"), as its adapter
+   * declares it. Null from a server predating the field. */
+  displayName: string | null;
+  /** The platform's page under the messaging-apps docs, or null where the
+   * server has none (or predates the field). */
+  docsSlug: string | null;
+  /** The platform's logo as SVG markup, or null where the server ships none.
+   * It comes from the server, so it is drawn as an image, never inlined. */
+  iconSvg: string | null;
+  /** Whether connections of this type receive events on an address of their
+   * own, which the operator has to give the platform. */
+  receivesWebhooks: boolean;
   fields: BridgeConfigField[];
   /** Whether this platform can create channels at all — read from the
    * adapter class, so it is answerable before any connection of this type
@@ -584,6 +691,64 @@ export type DeleteBridgeResult =
   | { kind: 'unauthenticated' }
   | { kind: 'forbidden' }
   | { kind: 'not-found' }
+  | { kind: 'error'; message: string };
+
+/**
+ * Switch Trust's one server-global guardrails settings row
+ * (`GET /trust-settings`). One policy covers the whole deployment, not a
+ * workspace, so this has no `workspaceId` the way bridge-shaped types do.
+ *
+ * The API key is never returned by the gateway — `hasApiKey`/`apiKeyLast4`
+ * only confirm one is stored, so a form can show "configured" without ever
+ * holding the real value.
+ */
+export type TrustSettings = {
+  endpoint: string;
+  /** Null until a policy id has been saved — the check is off until then. */
+  policyId: string | null;
+  hasApiKey: boolean;
+  apiKeyLast4: string | null;
+  /** `policyId` and an API key are both set. */
+  enabled: boolean;
+};
+
+/** Outcome of loading Switch Trust's settings (`GET /trust-settings`).
+ * Admin-only (a deployment operator, not a workspace admin), so a signed-in
+ * non-operator gets `forbidden` rather than an empty form. */
+export type FetchTrustSettingsResult =
+  | { kind: 'loaded'; settings: TrustSettings }
+  | { kind: 'unauthenticated' }
+  | { kind: 'forbidden' }
+  | { kind: 'error'; message: string };
+
+/**
+ * Parameters for saving Switch Trust's settings (`PUT /trust-settings`).
+ * `apiKey` left unset leaves whatever key is already stored untouched, so
+ * resaving the endpoint or policy id doesn't force re-entering the secret.
+ */
+export type UpdateTrustSettingsParams = {
+  serverId: string;
+  endpoint: string;
+  policyId: string | null;
+  apiKey?: string;
+};
+
+/** Outcome of saving Switch Trust's settings. Mirrors {@link
+ * UpdateBridgeResult}'s recoverable cases. */
+export type UpdateTrustSettingsResult =
+  | { kind: 'saved'; settings: TrustSettings }
+  | { kind: 'unauthenticated' }
+  | { kind: 'forbidden' }
+  | { kind: 'invalid'; message: string }
+  | { kind: 'error'; message: string };
+
+/** Outcome of turning Switch Trust off (`DELETE /trust-settings`). Not
+ * `deleted`, since the row's absence is itself a valid, steady state (a
+ * deployment that has never configured it) rather than something removed. */
+export type ClearTrustSettingsResult =
+  | { kind: 'cleared'; settings: TrustSettings }
+  | { kind: 'unauthenticated' }
+  | { kind: 'forbidden' }
   | { kind: 'error'; message: string };
 
 /** A bridged (external) human identity on a server. The `users` dimension of an
@@ -766,15 +931,12 @@ export type AgentProviderKind = 'anthropic' | 'third-party';
  */
 export type ProvisionAgentParams = {
   workspaceId: string;
-  /** The agent's working directory; the settings file is written here and used
-   * as `repo_dir` so an offline-session command can `cd` into it. */
+  /** The agent's working directory; the settings file is written here, and it
+   * is recorded as `repo_dir` so Console can find the agent on a remote host. */
   dir: string;
   name: string;
   description: string;
   providerKind: AgentProviderKind;
-  /** Register with the `auto_session` connection model: Switch Console watches the
-   * agent's rooms and auto-spawns a session on notification. Defaults to off. */
-  autoSession?: boolean;
 };
 
 /**
@@ -793,8 +955,6 @@ export type ProvisionRemoteAgentParams = {
   name: string;
   description: string;
   providerKind: AgentProviderKind;
-  /** Register with the `auto_session` connection model. Defaults to off. */
-  autoSession?: boolean;
 };
 
 /**
@@ -842,9 +1002,11 @@ export type CreateRoomParams = {
   description: string;
   /** Room-specific system prompt shown to agents on connect. Optional. */
   instructions?: string;
-  bridgeId: string;
-  /** Switch agent ids to add as members. May be empty — a bridged room is
-   * valid with no agents, and members can be invited later. */
+  /** The messaging app to bridge the room to, or null for an internal room
+   * that people reach from Switch Console's chats. */
+  bridgeId: string | null;
+  /** Switch agent ids to add as members. May be empty — a room is valid with
+   * no agents, and members can be invited later. */
   agentIds: string[];
 };
 

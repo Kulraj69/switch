@@ -2,9 +2,13 @@ import { useQuery } from '@tanstack/react-query';
 import { observer } from 'mobx-react-lite';
 import { useEffect } from 'react';
 import { agentsStore } from '@renderer/features/locations/stores/agents-store';
+import {
+  useManagedAgents,
+  withoutManaged,
+} from '@renderer/features/managed-agents/use-managed-agents';
 import { workspacesStore } from '@renderer/features/workspaces/workspaces-store';
 import { rpc } from '@renderer/lib/ipc';
-import { switchRoomsStore } from './switch-rooms-store';
+import { useReadableRoomsInWorkspace } from './use-listed-rooms';
 
 /**
  * How much of this server Switch Console is holding: the agents onboarded
@@ -35,20 +39,20 @@ export const ServerStatTiles = observer(function ServerStatTiles({
     if (!agentsStore.loaded) void agentsStore.load();
   }, []);
 
+  // Counted the way the Your Agents page lists them: this Console's agents,
+  // less the ones the server runs, plus every agent the server runs.
+  const managed = useManagedAgents(serverId);
+  const rooms = useReadableRoomsInWorkspace(workspaceId);
+  const agentCount =
+    !agentsStore.loaded || managed.isLoading
+      ? null
+      : withoutManaged(agentsStore.agentsOnServer(serverId), managed.data).length +
+        (managed.data?.length ?? 0);
+
   return (
     <div className="grid grid-cols-3 gap-3">
-      <StatTile
-        label="Your Agents"
-        value={agentsStore.loaded ? agentsStore.agentsOnServer(serverId).length : null}
-      />
-      <StatTile
-        label="Your Rooms"
-        value={
-          workspaceId === null
-            ? null
-            : switchRoomsStore.readableRoomsInWorkspace(workspaceId).length
-        }
-      />
+      <StatTile label="Your Agents" value={agentCount} />
+      <StatTile label="Your Rooms" value={workspaceId === null ? null : rooms.length} />
       <StatTile label="Messaging apps" value={bridgesQuery.data?.length ?? null} />
     </div>
   );

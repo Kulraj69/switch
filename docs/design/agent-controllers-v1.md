@@ -8,8 +8,8 @@ where it deliberately stops short.
 
 ## Shape
 
-- **Management** (Core package `switch_core/management/`, off unless
-  `AGENT_MANAGEMENT_ENABLED=true`): the source of truth for managed agents. It holds agent
+- **Management** (Core package `switch_core/management/`, off unless the
+  `agent_management` feature flag is on): the source of truth for managed agents. It holds agent
   definitions, which controller each one runs on, controller enrollment and credentials,
   controller status, and operations.
 - **Agents controller** (`console/packages/agent-controller`, a Node CLI): one per
@@ -25,7 +25,7 @@ where it deliberately stops short.
 |---|---|---|
 | Controllers act as agents on `/agents/{id}/...` with a controller token | **Not in v1.** The controller fetches a per-agent API key from Management for each bound agent. Every fetch **rotates** the key, which invalidates any earlier holder | The agent host and session hosts read the agent token once, from the credentials file, and cannot refresh a short-lived token. Moving to scoped tokens needs a runtime change first |
 | One SSE stream per controller carrying agent events | **The controller stream carries only nudges** (`assignment.changed`, `operation.pending`, `credential.revoked`). Agent events stay on per-agent agent host streams | Avoids touching message delivery. That is roadmap step 7 |
-| Connector tokens, sealed provider logins | Not in v1 | Later steps |
+| Connector tokens, sealed provider logins | Not in v1. Service tokens are specified in `service-connections-v1.md` | Later steps |
 | Enrollment by EC2 machine secret | Not in v1. Supported: Console sign-in (gateway) and one-time code (headless) | |
 | Operations | `agent.restart` and `provider.recheck` only. Core rejects other kinds with `400 operation_unsupported` | |
 | Per-tenant flag | Deployment-wide env flag | No per-tenant flag mechanism exists yet |
@@ -33,7 +33,9 @@ where it deliberately stops short.
 ## Core
 
 ### Config (`config.py`)
-- `agent_management_enabled: bool = False` (`AGENT_MANAGEMENT_ENABLED`).
+- `agent_management_enabled`: whether the `agent_management` feature flag is on
+  (`FEATURE_FLAGS_ENABLED`). `AGENT_MANAGEMENT_ENABLED=true`, the setting it replaced,
+  stops startup.
 - `controller_token_secret: str | None = None` (`CONTROLLER_TOKEN_SECRET`). **Required
   when the flag is on**: a model validator raises if it is missing or shorter than 32 chars. It is
   separate from `jwt_secret_key` on purpose.
@@ -104,7 +106,10 @@ Controller access token (`{id}` must match the token's `cid`, otherwise `403 for
   - Honours `If-None-Match`; returns `200` with an `ETag` header, or `304`.
 - `PUT  /v1/management/controllers/{id}/status`
   - Body: a `StatusReport`.
-  - Returns `{assignment_revision, report_within_s}`.
+  - Returns `{assignment_revision, report_within_s, controller_release}`.
+    `controller_release` is `{version, url, sha256}`, the controller package the
+    deployment names (`CONTROLLER_RELEASE_*`), or null when it names none and for a
+    `console` controller, which updates with Switch Console.
   - An older `seq` is ignored, and the response is still 200.
 - `GET  /v1/management/controllers/{id}/operations?state=pending`
   - Expired leases are re-offered.
@@ -143,7 +148,10 @@ Controller access token (`{id}` must match the token's `cid`, otherwise `403 for
     shows it open but the process holding it stopped or died), its last `status`, and
     `workspaces_dir`: the directory the controller makes
     agents' workspaces in, from that status (`machine.workspaces_dir`), null when it has not
-    reported one.
+    reported one. `release` is `{wanted, running, current}`: the controller version the
+    deployment names, the one the controller last reported, and whether they are the
+    same; null when the deployment names none, and for a `console` controller. How the controller's move to it is going
+    is in its status's `update` (`{target, state, problem}`), when it reports one.
 - `PATCH  /gateway/management/controllers/{id}`
   - Body: `{name?, description?}`, at least one. Renames the machine and/or changes its
     description; `description: null` (or blank) clears it. Same limits as at enrollment;
@@ -169,7 +177,10 @@ Controller access token (`{id}` must match the token's `cid`, otherwise `403 for
 - `POST   /gateway/management/operations` and `GET /gateway/management/operations?controller_id=`.
 - `GET    /gateway/management/advanced-config` returns each provider's advanced-configuration
   schema, `{"providers": {"claude": {"fields": [...]}, "codex": ..., "opencode": ...,
-  "cursor": {"fields": []}, "antigravity": {"fields": []}}}` (see Advanced configuration below).
+  "cursor": {"fields": []}, "antigravity": {"fields": []}}}` (see Advanced configuration below),
+  and `GET /gateway/management/providers` the providers in order, each with its label and the
+  same fields. These two are served whether or not agent management is on: Switch Console
+  builds the advanced-configuration form of the agents it runs itself from them too.
 
 **Placement checks** run on create, adopt and move, and on a change to `running`. Each failure returns `409` with a reason:
 - `controller_revoked`
@@ -194,17 +205,27 @@ Any change that affects a controller bumps its `assignment_revision` and nudges 
 ### Definition (v1)
 ```json
 {"provider": "claude|codex|opencode|antigravity|cursor",
- "model": null, "advanced_config": {}, "instructions": "", "auto_approve": false,
- "directory": null, "isolation": "shared"}
+ "model": null, "advanced_config": {}, "instructions": "", "auto_mode": true,
+ "auto_approve": false, "directory": null, "isolation": "shared"}
 ```
+
+`auto_mode` (default `true` on create) asks the provider for its own automatic review:
+safe actions run, risky ones still ask a person. `auto_approve` is bypass, every permission
+check skipped, and wins over `auto_mode`. A definition stored before `auto_mode` existed has
+no such key and reads as `false` (`schemas.stored_definition`): the managed-agent view, the
+assignment entry and an agent's update all fill it in that way, so an existing agent keeps
+its behaviour until someone turns auto mode on.
 
 ### Advanced configuration
 `advanced_config` carries the provider's "Advanced configuration", the per-provider settings
 Switch Console offers for its own agents. The server owns one fixed schema per provider
 (`management/advanced_config.py`), checks every create and update against it whatever
 machine runs the agent, and serves it at `GET /gateway/management/advanced-config` and
-through the `get_advanced_config(provider)` agent operation. Controllers report nothing
-about settings; they apply what they are given.
+through the `get_advanced_config(provider)` agent operation. Switch Console and the
+controller hold no copy of the fields; their provider plugins only apply values, by key.
+Controllers report nothing about settings; they apply what they are given, and report
+`definition_invalid` for a key their build does not apply or a value of a shape it cannot
+apply, rather than starting the agent without it.
 
 - Each served field is `{key, label, type, help, placeholder, options, catalogue}`. `type`
   is `text` or `textarea` (a string), `number` (finite), `boolean`, `list` (strings) or
@@ -255,7 +276,8 @@ registers every declared operation and filters by the registry per request).
 - `get_advanced_config(provider)`: the provider's advanced-configuration fields, as the
   gateway serves them.
 - `create_agent(name, description, machine, provider, model=None, advanced_config=None,
-  instructions="", directory=None, auto_approve=False, display_name=None, icon_url=None,
+  instructions="", directory=None, auto_mode=True, auto_approve=False, display_name=None,
+  icon_url=None,
   start=True)`: builds the same
   `CreateManagedAgentRequest` the gateway route takes and calls
   `ManagementService.create_managed_agent`, so validation, placement checks, owner-only
@@ -265,7 +287,8 @@ registers every declared operation and filters by the registry per request).
   The agent is owned by the calling agent's owner, with `auto_session` true and the
   capability off. Returns `{agent_id, name, machine: {id, name}, desired_state, hint}`.
 - `list_managed_agents()`: the owner's managed agents, each `{agent_id, name, display_name,
-  description, provider, model, advanced_config, machine: {id, name, state} | null,
+  description, provider, model, advanced_config, auto_mode, auto_approve,
+  machine: {id, name, state} | null,
   desired_state, actual:
   {process, reason, detail, applied_revision, since, directory} | null, revision}`, `actual`
   being the agent's entry in its controller's last status, plus top-level `directory`, the one
@@ -487,7 +510,7 @@ stream. The flag and everything else above stay as they are.
   owner stopped it and has to set it running, or its machine (the
   controller's name, carried on the binding) is offline or reconnecting, or
   has been removed once it is revoked. A controller-backed agent is never
-  offered the terminal command or told to open Switch Console.
+  told to open Switch Console.
   In-room session commands (`!reset`, `!compact`) are still relayed on the
   controller's stream with the room, and the controller picks the session.
 - **Liveness** is "socket attached and a pong within 6 s"; the connection sweep

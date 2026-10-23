@@ -70,11 +70,15 @@ export type MachineHealth =
 
 /** Switch's agent management, through the signed-in session of the agent's workspace. */
 export interface MigrationManagementPort {
-  /** Whether the server runs agent management, and whether the signed-in user owns the agent. */
+  /**
+   * Whether the server runs agent management, and whether the signed-in user
+   * owns the agent. `gone` when the server says it has no such agent: it was
+   * deleted there.
+   */
   eligibility(
     workspaceId: string,
     switchAgentId: string
-  ): Promise<{ management: boolean; owner: string | null; ownedByMe: boolean }>;
+  ): Promise<{ management: boolean; owner: string | null; ownedByMe: boolean; gone?: true }>;
   /** `PUT /gateway/management/agents/{id}`: places the agent on the controller. */
   adopt(
     workspaceId: string,
@@ -155,6 +159,11 @@ export type AgentMigrationDeps = {
     list(): Promise<MigrationAgent[]>;
     /** Somebody stopped this agent's watcher by hand. */
     stoppedByHand(agentId: string): Promise<boolean>;
+    /**
+     * Removes an agent its server has deleted from this Console. Only the
+     * Console's row: files on its machine are left where they are.
+     */
+    forget(agentId: string): Promise<void>;
   };
   definitions: {
     build(agent: MigrationAgent): Promise<BuiltDefinition>;
@@ -345,6 +354,16 @@ export class AgentMigrationService {
     });
   }
 
+  /**
+   * Removes the Console agents linked to a Switch agent just deleted on its
+   * server, rather than leaving them under Legacy until a pass finds it gone.
+   */
+  async forgetDeleted(serverId: string, switchAgentId: string): Promise<void> {
+    for (const agent of await this.deps.agents.list())
+      if (agent.serverId === serverId && agent.switchAgentId === switchAgentId)
+        await this.forgetGone(agent, `gone:${agent.id}`, this.deps.now());
+  }
+
   /** Why each agent the last automatic passes could not move did not, by agent. */
   migrationProblems(): MigrationProblem[] {
     return [...this.problems.values()];
@@ -400,6 +419,14 @@ export class AgentMigrationService {
     };
   }
 
+  /**
+   * Forgets every agent that could not be managed, so the next pass asks Switch
+   * about each again: a server that has just turned agent management on.
+   */
+  recheckAll(): void {
+    for (const agentId of this.unmanageableUntil.keys()) this.recheck(agentId);
+  }
+
   /** Forgets that an agent could not be managed, so the next pass asks Switch again. */
   recheck(agentId: string): void {
     this.unmanageableUntil.delete(agentId);
@@ -424,6 +451,10 @@ export class AgentMigrationService {
       if (await this.isManaged(agent)) {
         this.leftAlone.delete(agent.id);
         this.unasked.delete(agent.id);
+        if (await this.deletedOnServer(agent, now)) {
+          await this.forgetGone(agent, `gone:${agent.id}`, now);
+          continue;
+        }
         candidates.push(agent);
         continue;
       }
@@ -446,6 +477,12 @@ export class AgentMigrationService {
       }
       this.unasked.delete(agent.id);
       this.retryAt.delete(`ask:${agent.id}`);
+      if (eligibility.gone) {
+        // Deleted on its server: there is nothing to move it to and no way back,
+        // and listing it here (and under Legacy) only keeps asking about it.
+        await this.forgetGone(agent, `ask:${agent.id}`, now);
+        continue;
+      }
       if (!eligibility.management || !eligibility.ownedByMe) {
         this.unmanageableUntil.set(agent.id, now + this.deps.unmanageableRecheckMs);
         this.problems.delete(agent.id);
@@ -886,6 +923,50 @@ export class AgentMigrationService {
     return (await this.deps.store.forIdentity(agent.id, agent.switchAgentId)) !== null;
   }
 
+  /**
+   * Whether a moved agent's server has deleted it, asked at most once every
+   * `healIntervalMs`. Deleting a managed agent deletes it on its server only,
+   * so the Console row it was moved from would otherwise stay, under Legacy.
+   */
+  private async deletedOnServer(agent: MigrationAgent, now: number): Promise<boolean> {
+    const key = `gone:${agent.id}`;
+    if (!agent.workspaceId || !agent.switchAgentId) return false;
+    if (this.operations.has(agent.id) || !this.due(key, now)) return false;
+    let eligibility: Awaited<ReturnType<MigrationManagementPort['eligibility']>>;
+    try {
+      eligibility = await this.deps.management.eligibility(agent.workspaceId, agent.switchAgentId);
+    } catch (error) {
+      this.deps.log.warn('Switch could not be asked whether a moved agent still exists', {
+        agentId: agent.id,
+        error: message(error),
+      });
+      this.backOff(key, now);
+      return false;
+    }
+    if (eligibility.gone) return true;
+    this.backOff(key, now, this.deps.healIntervalMs);
+    return false;
+  }
+
+  private async forgetGone(agent: MigrationAgent, retryKey: string, now: number): Promise<void> {
+    this.deps.log.warn('Removing an agent its server no longer has', {
+      agentId: agent.id,
+      switchAgentId: agent.switchAgentId,
+    });
+    try {
+      await this.deps.agents.forget(agent.id);
+      this.retryAt.delete(retryKey);
+    } catch (error) {
+      this.deps.log.error('Could not remove an agent its server no longer has', {
+        agentId: agent.id,
+        error: message(error),
+      });
+      this.backOff(retryKey, now);
+    }
+    this.leftAlone.delete(agent.id);
+    this.problems.delete(agent.id);
+  }
+
   // ── State ──────────────────────────────────────────────────────────────────
 
   private async consoleState(
@@ -993,6 +1074,8 @@ export class AgentMigrationService {
         agent.workspaceId!,
         agent.switchAgentId!
       );
+      if (eligibility.gone)
+        return 'Its server no longer has this agent, so Console removes it on its next check.';
       if (!eligibility.management)
         return 'This server does not have agent management turned on, so it cannot run agents on machines.';
       if (!eligibility.ownedByMe)

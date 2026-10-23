@@ -116,6 +116,7 @@ export class FakeRuntime implements AgentRuntime {
         updatedAt: new Date(0).toISOString(),
         current: true,
       },
+      outdated: false,
     } satisfies Partial<AgentObservation>);
   }
 
@@ -130,6 +131,14 @@ export class FakeRuntime implements AgentRuntime {
 
   agentStateRoot(agentId: string): string {
     return `/data/watchers/${agentId}`;
+  }
+
+  readonly warms: { agentId: string; roomId: string }[] = [];
+  warmFailure: Error | null = null;
+
+  async warm(agentId: string, roomId: string): Promise<void> {
+    if (this.warmFailure) throw this.warmFailure;
+    this.warms.push({ agentId, roomId });
   }
 
   async probe(
@@ -168,6 +177,6 @@ export class FakeLocator implements ProviderLocator {
 
   async locate(provider: Provider): Promise<LocatedProvider | null> {
     if (this.missing.has(provider)) return null;
-    return { path: `/usr/bin/${provider}`, version: '1.2.3' };
+    return { path: `/usr/bin/${provider}`, version: '1.2.3', versionProblem: null };
   }
 }

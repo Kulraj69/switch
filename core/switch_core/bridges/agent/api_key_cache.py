@@ -18,9 +18,8 @@ class ApiKeyCache:
     """A short-lived memo of resolved agent bearer tokens.
 
     Every authenticated request resolves its token against Postgres before the
-    handler runs, and an agent connection beats every couple of seconds, so
-    that one lookup is the bulk of the traffic through the connection pool —
-    including the heartbeats whose deadline the pool is capable of missing.
+    handler runs, so that one lookup is the bulk of the traffic an agent's
+    requests put through the connection pool.
 
     What it deliberately does not do:
 

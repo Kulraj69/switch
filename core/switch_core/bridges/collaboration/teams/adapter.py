@@ -23,6 +23,7 @@ from pydantic.json_schema import SkipJsonSchema
 
 from switch_core.bridges.agent.commands import COMMANDS_BY_NAME
 from switch_core.bridges.collaboration.adapter import (
+    AgentIdentity,
     ChannelNotBindable,
     ConfigEditRefused,
     PlatformAdapter,
@@ -142,8 +143,7 @@ about how much a reader wants in front of them, not about what Teams accepts.
 It is also what keeps the fold rendering as one block to a line — past roughly
 this much, split into lines this short, `cards.body_blocks` runs out of its
 structural budget and sets the whole log as one double-spaced block instead.
-The log says how many calls it left out, and the status above it links Console,
-which has all of them.
+The log says how many calls it left out.
 """
 
 _THROTTLE_BACKOFF = 5.0
@@ -765,6 +765,18 @@ class TeamsAdapter(PlatformAdapter):
     Microsoft Graph change-notification subscriptions.
     """
 
+    display_name: ClassVar[str] = "Microsoft Teams"
+    # Switch is not granted Channel.Delete.All, so a deleted room's channel
+    # stays for someone to remove in Teams.
+    channel_on_delete = "kept"
+    docs_slug: ClassVar[str | None] = "microsoft-teams"
+    # Graph delivers a channel's messages to every subscription made for it,
+    # so only the process holding the bridge makes, adopts and renews them.
+    # A quiet copy still receives activities and notifications, which reach
+    # whichever process the load balancer picks, and relays to the holder
+    # what would change its subscriptions (`receive_relayed`).
+    keeps_quiet_unless_listening: ClassVar[bool] = True
+
     # Teams keeps only http(s) anchors: a link on any other scheme is stripped
     # whole, label and all, so a `switchdash://` deeplink left the literal
     # brackets around it and rendered as "()". It needs the https redirect,
@@ -1159,9 +1171,12 @@ class TeamsAdapter(PlatformAdapter):
             # Only once there is something to answer with: an activity taken
             # before then is acknowledged and lost, and Teams does not resend.
             await self._open_listener()
+        # The approval is checked everywhere, so any copy can say it is gone.
+        self._renewal_task = asyncio.create_task(self._renewal_loop())
+        if not self._listening:
+            return
         async with self._sub_lock:
             await self._adopt_existing_subscriptions()
-        self._renewal_task = asyncio.create_task(self._renewal_loop())
         self._repair_task = asyncio.create_task(self._repair_loop())
 
     async def _open_listener(self) -> None:
@@ -1197,6 +1212,10 @@ class TeamsAdapter(PlatformAdapter):
         This is also why one Entra app must never serve two environments: each
         would read the other's subscriptions as stale and delete them.
 
+        A quiet copy only learns which subscriptions are this bridge's, to
+        check the notifications that reach it, and deletes none: they are the
+        holder's to manage.
+
         Until this has succeeded once, no subscription is made: one made for a
         channel whose live subscription could not be seen would be a second,
         delivering every message twice until the first runs out. A failure here
@@ -1229,7 +1248,7 @@ class TeamsAdapter(PlatformAdapter):
                     self._subscription_expiry[channel_id] = expiry
                 continue
             stale_id = str(sub.get("id", ""))
-            if not stale_id:
+            if not stale_id or not self._listening:
                 continue
             try:
                 await self._graph.delete_subscription(subscription_id=stale_id)
@@ -1283,7 +1302,8 @@ class TeamsAdapter(PlatformAdapter):
             # with it renewal, silently and for good.
             try:
                 await self._check_approval()
-                await self._renew_due_subscriptions()
+                if self._listening:
+                    await self._renew_due_subscriptions()
             except Exception:
                 logger.exception(
                     "Teams subscription renewal failed this round; trying again in %ss",
@@ -2031,7 +2051,6 @@ class TeamsAdapter(PlatformAdapter):
                     limit=max(1, limit - len(tail)),
                     markup=markup,
                     elapsed_seconds=content.elapsed_seconds,
-                    session_url=content.session_url,
                     mention=mention,
                     error_summary=content.error_summary,
                     tool_detail=True,
@@ -2158,9 +2177,8 @@ class TeamsAdapter(PlatformAdapter):
         "No activity." under a status line that already says the same is not
         something anyone pressed for.
 
-        The status above carries the Console link, so the log does not repeat
-        it, and it does not repeat the state line either — it would sit
-        directly under the copy of itself the card already shows.
+        The log does not repeat the state line: it would sit directly under the
+        copy of itself the card already shows.
         """
         if content.turn.status not in TURN_ENDED:
             return []
@@ -2174,7 +2192,6 @@ class TeamsAdapter(PlatformAdapter):
                 limit=_DETAIL_LIMIT,
                 markup=self.rich_markup(),
                 elapsed_seconds=content.elapsed_seconds,
-                session_url=None,
                 heading=False,
             )
         )
@@ -2767,13 +2784,11 @@ class TeamsAdapter(PlatformAdapter):
 
     # ── Agent identity ───────────────────────────────────────────────────────
 
-    async def create_agent_identity(
-        self, agent_name: str, agent_description: str
-    ) -> None:
+    async def create_agent_identity(self, agent: AgentIdentity) -> None:
         # Single-bot model: no per-agent platform account is created.
         pass
 
-    async def remove_agent_identity(self, agent_name: str) -> None:
+    async def remove_agent_identity(self, agent: AgentIdentity) -> None:
         pass
 
     async def get_channel_agent_names(self, channel_id: str) -> list[str]:
@@ -3203,6 +3218,9 @@ class TeamsAdapter(PlatformAdapter):
 
     async def _switch_joined_team(self, team_id: str) -> None:
         """Switch is in a team now: capture the channels waiting on that."""
+        if not self._listening:
+            self._hand_to_holder({"action": "team_joined", "team_id": team_id})
+            return
         self._team_has_switch[team_id] = (True, time.monotonic())
         waiting = [c for c, t in self._capture_parked.items() if t == team_id]
         for channel_id in waiting:
@@ -3211,6 +3229,9 @@ class TeamsAdapter(PlatformAdapter):
 
     async def _switch_left_team(self, team_id: str) -> None:
         """Switch is out of a team: stop capturing it, ready to resume on return."""
+        if not self._listening:
+            self._hand_to_holder({"action": "team_left", "team_id": team_id})
+            return
         self._team_has_switch[team_id] = (False, time.monotonic())
         known = (
             self._capture_wanted | set(self._subscriptions) | set(self._team_of_channel)
@@ -4029,7 +4050,19 @@ class TeamsAdapter(PlatformAdapter):
 
         Wanted before it is checked for, so a channel whose subscription was
         adopted at start, and later lost, is still one the repair loop owes.
+
+        A quiet copy hands the channel, and the team it knows it is in, to the
+        process holding the bridge, which makes the subscription.
         """
+        if not self._listening:
+            self._hand_to_holder(
+                {
+                    "action": "capture",
+                    "channel_id": channel_id,
+                    "team_id": self._capture_team(channel_id) or "",
+                }
+            )
+            return
         self._capture_wanted.add(channel_id)
         if self._graph is None or self._withdrawing:
             return
@@ -4193,7 +4226,8 @@ class TeamsAdapter(PlatformAdapter):
         the distributed app the deployment's route has already checked Graph's
         validation tokens and routed the item by the organisation they vouch
         for; what is checked here holds either way — the organisation's own
-        `clientState`, and that the subscription is one this bridge made.
+        `clientState`, and that the subscription is one this bridge made (on
+        a quiet copy, a removal is left for the holder to check).
         """
         # Authenticate origin BEFORE acting on anything — data notifications and
         # lifecycle events alike. clientState is the bring-your-own bridge's only
@@ -4210,7 +4244,20 @@ class TeamsAdapter(PlatformAdapter):
             logger.warning("Rejected Graph notification: clientState mismatch")
             return
         subscription_id = str(item.get("subscriptionId", ""))
-        if identity.shared and not await self._knows_subscription(subscription_id):
+        # A quiet copy relays a removal to the holder without first knowing
+        # the subscription. It adopts none at start, and Graph no longer lists
+        # one it has removed, so reading them again cannot find it either: the
+        # check would refuse every removal that reached this process, and the
+        # holder would leave capture off until its repair loop noticed. The
+        # holder recreates only a subscription it holds, so it decides.
+        relays_removal = (
+            not self._listening and item.get("lifecycleEvent") == "subscriptionRemoved"
+        )
+        if (
+            identity.shared
+            and not relays_removal
+            and not await self._knows_subscription(subscription_id)
+        ):
             logger.warning(
                 "Rejected a Graph notification for subscription %s, which the "
                 "bridge for organisation %s did not make%s",
@@ -4251,7 +4298,11 @@ class TeamsAdapter(PlatformAdapter):
         answered, so they would be lost until the repair loop next reads them.
         An unknown one is a reason to read them now.
         """
-        if self._owns_subscription(subscription_id) or self._adopted:
+        # A quiet copy reads them again for one it does not know, cooldown
+        # permitting: the holder may have made it since this copy last read.
+        if self._owns_subscription(subscription_id) or (
+            self._adopted and self._listening
+        ):
             return self._owns_subscription(subscription_id)
         async with self._sub_lock:
             now = time.monotonic()
@@ -4259,7 +4310,7 @@ class TeamsAdapter(PlatformAdapter):
                 self._adopt_on_demand_at is None
                 or now - self._adopt_on_demand_at >= _ADOPT_ON_DEMAND_COOLDOWN_SECONDS
             )
-            if not self._adopted and due:
+            if (not self._adopted or not self._listening) and due:
                 # Spaced out, so a run of unknown ones — Graph failing, or
                 # someone holding the organisation's clientState — is not one
                 # listing each.
@@ -4270,6 +4321,15 @@ class TeamsAdapter(PlatformAdapter):
     async def _handle_lifecycle_event(self, item: dict[str, Any]) -> None:
         event = item.get("lifecycleEvent")
         subscription_id = str(item.get("subscriptionId", ""))
+        if not self._listening:
+            self._hand_to_holder(
+                {
+                    "action": "lifecycle",
+                    "event": str(event),
+                    "subscription_id": subscription_id,
+                }
+            )
+            return
         if event == "reauthorizationRequired":
             await self._renew_subscription(
                 self._channel_of_subscription(subscription_id), subscription_id
@@ -4285,6 +4345,32 @@ class TeamsAdapter(PlatformAdapter):
                 subscription_id,
                 event,
             )
+
+    async def receive_relayed(self, request: Mapping[str, str]) -> None:
+        """What a quiet copy in another process relayed here, the holder:
+        each the same call the quiet copy would have made had it held the
+        bridge. Checked there as it would have been here: the activity's
+        token, or the notification's `clientState` and subscription."""
+        action = request.get("action")
+        if action == "capture":
+            channel_id = request["channel_id"]
+            team_id = request.get("team_id")
+            if team_id:
+                await self._learn_channel_team(channel_id, team_id)
+            await self._ensure_channel_subscription(channel_id)
+        elif action == "team_joined":
+            await self._switch_joined_team(request["team_id"])
+        elif action == "team_left":
+            await self._switch_left_team(request["team_id"])
+        elif action == "lifecycle":
+            await self._handle_lifecycle_event(
+                {
+                    "lifecycleEvent": request["event"],
+                    "subscriptionId": request["subscription_id"],
+                }
+            )
+        else:
+            logger.warning("Ignoring a relayed Teams request %r", request)
 
     def _channel_of_subscription(self, subscription_id: str) -> str | None:
         return next(

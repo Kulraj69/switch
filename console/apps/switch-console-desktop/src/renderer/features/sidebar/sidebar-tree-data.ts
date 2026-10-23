@@ -1,6 +1,7 @@
 import { agentsStore } from '@renderer/features/locations/stores/agents-store';
 import type { LocationStore } from '@renderer/features/locations/stores/location';
 import type { SessionStore } from '@renderer/features/sessions/stores/session-store';
+import { serverAvailability } from '@renderer/features/switch-servers/server-availability';
 import { switchRoomsStore } from '@renderer/features/switch-servers/switch-rooms-store';
 import { workspacesStore } from '@renderer/features/workspaces/workspaces-store';
 import { toast } from '@renderer/lib/hooks/use-toast';
@@ -168,7 +169,18 @@ export async function refreshSidebarRoomStateAfterOnboarding(): Promise<void> {
  * lettered picture with nothing explaining why.
  */
 async function giveExistingAgentsAnIcon(): Promise<void> {
-  const workspaceIds = new Set(switchIdentities().map((identity) => identity.workspaceId));
+  // A server this Console runs that is not running has nothing to store them
+  // in yet; its workspace is frozen and says so, and they are saved once it is up.
+  const dormant = new Set(
+    agentsInActiveScope()
+      .filter(({ agent }) => agent.serverId && serverAvailability(agent.serverId) === 'dormant')
+      .map(({ agent }) => agent.workspaceId)
+  );
+  const workspaceIds = new Set(
+    switchIdentities()
+      .map((identity) => identity.workspaceId)
+      .filter((workspaceId) => !dormant.has(workspaceId))
+  );
   for (const workspaceId of workspaceIds) {
     try {
       reportBackfill(workspaceId, await rpc.workspaces.backfillAgentIcons(workspaceId));
@@ -226,5 +238,8 @@ function reportBackfill(workspaceId: string, outcome: AgentIconBackfill): void {
     });
     return;
   }
+  // 'written' and 'disabled' both fall through here silently: a server that
+  // disables third-party avatars wrote nothing on purpose, which is the
+  // outcome working as intended, not a problem to surface.
   reportedBackfill.delete(workspaceId);
 }

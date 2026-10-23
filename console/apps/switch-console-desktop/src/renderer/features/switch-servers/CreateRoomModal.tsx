@@ -246,10 +246,9 @@ export const CreateRoomModal = observer(function CreateRoomModal({
             )}
             {noneCanCreateChannels && (
               <p className="text-xs text-destructive">
-                None of the running messaging apps can create a channel from Switch — for example, a
-                Telegram bot can&apos;t create chats on its own. Make the chat directly in the
-                messaging app instead (for Telegram, create the group and add the bot to it) and it
-                becomes a room here once it exists.
+                None of the running messaging apps can create a channel from Switch. Make the chat
+                directly in the messaging app instead and add the app&apos;s bot to it — it becomes
+                a room here once it exists.
               </p>
             )}
             {bridgesQuery.isError && (
@@ -308,6 +307,7 @@ export const CreateRoomModal = observer(function CreateRoomModal({
                   <ChosenAgentTile
                     key={agent.id}
                     agent={agent}
+                    serverId={serverId || null}
                     subtitle={providerLabel(agent.id)}
                     onRemove={() =>
                       setAgents((current) => current.filter((a) => a.id !== agent.id))
@@ -322,7 +322,11 @@ export const CreateRoomModal = observer(function CreateRoomModal({
               onPick={(next) => setAgents((current) => [...current, next])}
               searchText={(item) => item.name}
               renderItem={(item) => (
-                <AgentPickerRow agent={item} subtitle={providerLabel(item.id)} />
+                <AgentPickerRow
+                  agent={item}
+                  serverId={serverId || null}
+                  subtitle={providerLabel(item.id)}
+                />
               )}
               disabled={agentsQuery.isLoading}
               placeholder={agentsQuery.isLoading ? 'Loading agents…' : 'Search agents to add...'}
