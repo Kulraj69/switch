@@ -381,7 +381,10 @@ export function ConnectorAppSetupDialog({
                   onCheckedChange={(checked) => setConfirmed(checked === true)}
                   className="mt-0.5"
                 />
-                {confirmation}
+                <span className="flex flex-col gap-0.5">
+                  <span>{confirmation.label}</span>
+                  <span className="text-xs text-foreground-muted">{confirmation.why}</span>
+                </span>
               </label>
             )}
             {mode === 'enter_again' && replacing && (

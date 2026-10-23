@@ -414,11 +414,19 @@ export function removeWarning(app: ConnectorApp): string {
   return `Nobody will be able to connect ${name}, and ${people} connected now lose it. They can still disconnect.`;
 }
 
+export interface Confirmation {
+  label: string;
+  /** What goes wrong when it isn't so. */
+  why: string;
+}
+
 /** What the operator confirms before the check, because asking the vendor cannot show it. */
-export function confirmBeforeCheck(app: Pick<ConnectorApp, "slug">): string | null {
-  return app.slug === AIRTABLE
-    ? "I've set its support email, privacy policy URL and terms of service URL."
-    : null;
+export function confirmBeforeCheck(app: Pick<ConnectorApp, "slug">): Confirmation | null {
+  if (app.slug !== AIRTABLE) return null;
+  return {
+    label: "I've set its support email, privacy policy URL and terms of service URL.",
+    why: "Until all three are set, Airtable lets only the integration's owner connect.",
+  };
 }
 
 export interface ChecklistItem {

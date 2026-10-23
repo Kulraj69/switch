@@ -317,7 +317,8 @@ describe("an app that sends people back to Switch Console", () => {
   });
 
   it("asks the operator to confirm what no check can see: that the integration is published", () => {
-    expect(confirmBeforeCheck(AIRTABLE)).toMatch(/support email, privacy policy URL and terms of service URL/);
+    expect(confirmBeforeCheck(AIRTABLE)?.label).toMatch(/support email, privacy policy URL and terms of service URL/);
+    expect(confirmBeforeCheck(AIRTABLE)?.why).toMatch(/lets only the integration's owner connect/);
     expect(confirmBeforeCheck(NONE)).toBeNull();
   });
 

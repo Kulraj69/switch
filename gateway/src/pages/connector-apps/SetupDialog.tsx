@@ -319,7 +319,14 @@ export default function SetupDialog({
                       onChange={(event) => setConfirmed(event.target.checked)}
                     />
                   }
-                  label={confirmation}
+                  label={
+                    <>
+                      <Typography variant="body2">{confirmation.label}</Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {confirmation.why}
+                      </Typography>
+                    </>
+                  }
                 />
               )}
               {error && <Alert severity="error">{error}</Alert>}

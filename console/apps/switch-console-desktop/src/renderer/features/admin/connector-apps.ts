@@ -462,11 +462,19 @@ export const sentBackTo = (publicUrl: string): string => `People are sent back t
  * Whether an app can be set up or changed here now: a vendor that sends people
  * back to the server needs the public URL first.
  */
+export interface Confirmation {
+  label: string;
+  /** What goes wrong when it isn't so. */
+  why: string;
+}
+
 /** What the operator confirms before the check, because asking the vendor cannot show it. */
-export function confirmBeforeCheck(app: Pick<ConnectorApp, 'slug'>): string | null {
-  return app.slug === AIRTABLE
-    ? "I've set its support email, privacy policy URL and terms of service URL."
-    : null;
+export function confirmBeforeCheck(app: Pick<ConnectorApp, 'slug'>): Confirmation | null {
+  if (app.slug !== AIRTABLE) return null;
+  return {
+    label: "I've set its support email, privacy policy URL and terms of service URL.",
+    why: "Until all three are set, Airtable lets only the integration's owner connect.",
+  };
 }
 
 export function changeBlocked(app: ConnectorApp, publicUrl: string | null): boolean {
