@@ -1,3 +1,5 @@
+from collections.abc import Collection
+
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +73,17 @@ class AgentStore:
         )
         return result.scalar_one_or_none()
 
+    async def get_by_client_ids(
+        self, session: AsyncSession, client_ids: list[str]
+    ) -> list[Agent]:
+        """`get_by_client_id` for many clients in one query."""
+        if not client_ids:
+            return []
+        result = await session.execute(
+            select(Agent).where(Agent.client_id.in_(client_ids))
+        )
+        return list(result.scalars().all())
+
     async def get_by_api_key_id(
         self, session: AsyncSession, api_key_id: str
     ) -> Agent | None:
@@ -95,6 +108,18 @@ class AgentStore:
 
     async def get_all(self, session: AsyncSession) -> list[Agent]:
         result = await session.execute(select(Agent))
+        return list(result.scalars().all())
+
+    async def get_by_server_connector(
+        self, session: AsyncSession, connector_id: str
+    ) -> list[Agent]:
+        """The agents a server-side connector registered, in the bound tenant:
+        each carries the connector's id in its metadata."""
+        result = await session.execute(
+            select(Agent)
+            .where(Agent.metadata_["server_connector_id"].astext == connector_id)
+            .order_by(Agent.name)
+        )
         return list(result.scalars().all())
 
     async def get_by_owner(self, session: AsyncSession, owner_id: str) -> list[Agent]:
@@ -183,6 +208,20 @@ class AgentStore:
         result = await session.execute(select(Tool).where(Tool.agent_id == agent_id))
         return list(result.scalars().all())
 
+    async def tool_counts(
+        self, session: AsyncSession, agent_ids: Collection[str]
+    ) -> dict[str, int]:
+        """How many tools each agent has, in one query. An agent with none
+        has no key."""
+        if not agent_ids:
+            return {}
+        result = await session.execute(
+            select(Tool.agent_id, func.count())
+            .where(Tool.agent_id.in_(agent_ids))
+            .group_by(Tool.agent_id)
+        )
+        return {agent_id: count for agent_id, count in result.all()}
+
     async def get_tool(self, session: AsyncSession, tool_id: str) -> Tool | None:
         return await session.get(Tool, tool_id)
 
@@ -201,6 +240,20 @@ class AgentStore:
     async def get_models(self, session: AsyncSession, agent_id: str) -> list[Model]:
         result = await session.execute(select(Model).where(Model.agent_id == agent_id))
         return list(result.scalars().all())
+
+    async def model_counts(
+        self, session: AsyncSession, agent_ids: Collection[str]
+    ) -> dict[str, int]:
+        """How many models each agent has, in one query. An agent with none
+        has no key."""
+        if not agent_ids:
+            return {}
+        result = await session.execute(
+            select(Model.agent_id, func.count())
+            .where(Model.agent_id.in_(agent_ids))
+            .group_by(Model.agent_id)
+        )
+        return {agent_id: count for agent_id, count in result.all()}
 
     async def get_model(self, session: AsyncSession, model_id: str) -> Model | None:
         return await session.get(Model, model_id)

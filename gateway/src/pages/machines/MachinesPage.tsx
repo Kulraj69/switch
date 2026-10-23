@@ -35,8 +35,10 @@ import {
   type ManagedAgent,
   ManagementApiError,
   type Operation,
-  PROVIDERS,
+  fetchProviders,
+  type ProviderInfo,
   type ProviderStatus,
+  providerLabel,
   revokeController,
   unmanageAgent,
   updateManagedAgent,
@@ -46,13 +48,50 @@ import AddMachineDialog from "./AddMachineDialog";
 import EditMachineDialog from "./EditMachineDialog";
 import ManagedAgentDialog from "./ManagedAgentDialog";
 
-const REFRESH_MS = 10_000;
+const REFRESH_MS = 5_000;
 
 const STATE_COLOR: Record<ControllerState, "success" | "warning" | "default"> = {
   online: "success",
-  unknown: "warning",
+  offline: "warning",
+  unknown: "default",
   revoked: "default",
 };
+
+const DISCONNECT_REASON: Record<string, string> = {
+  socket_closed: "its controller stopped or lost its connection",
+  heartbeat_lapsed: "its connection stopped responding",
+  server_shutdown: "the Switch server it was connected to restarted",
+  server_lost: "the Switch server it was connected to stopped responding",
+  taken_over: "another instance of its controller took over",
+  revoked: "it was removed",
+};
+
+/** What the state chip says on hover: when the machine connected, or when and why it stopped. */
+function stateTitle(row: Controller): string {
+  const connection = row.connection;
+  if (row.state === "revoked") return "Removed from Switch.";
+  if (row.state === "unknown" || connection === null)
+    return "Has never connected to Switch. Start its controller with switch-agent-controller run.";
+  if (row.state === "online") return `Connected since ${absoluteTitle(connection.connected_at)}`;
+  const why = connection.disconnect_reason
+    ? (DISCONNECT_REASON[connection.disconnect_reason] ?? connection.disconnect_reason)
+    : null;
+  const when =
+    connection.disconnected_at !== null ? ` ${formatRelative(connection.disconnected_at)}` : "";
+  return `Disconnected${when}${why ? `: ${why}` : ""}.`;
+}
+
+/**
+ * The last time Switch heard from the machine at all: now while it is connected, else the
+ * latest of its status report, its socket attaching and its socket going.
+ */
+function lastContact(row: Controller): string | null {
+  if (row.state === "online") return new Date().toISOString();
+  const times = [row.last_seen_at, row.connection?.connected_at, row.connection?.disconnected_at]
+    .filter((t): t is string => typeof t === "string")
+    .sort((a, b) => Date.parse(b) - Date.parse(a));
+  return times[0] ?? null;
+}
 
 const PROCESS_COLOR: Record<string, "success" | "warning" | "error" | "default"> = {
   running: "success",
@@ -65,11 +104,7 @@ const PROCESS_COLOR: Record<string, "success" | "warning" | "error" | "default">
   failed: "error",
 };
 
-function providerLabel(provider: string): string {
-  return PROVIDERS.find((p) => p.value === provider)?.label ?? provider;
-}
-
-function providerChip(status: ProviderStatus) {
+function providerChip(status: ProviderStatus, label: (provider: string) => string) {
   const ok = status.installed && status.auth === "ok";
   const problem = !status.installed
     ? "not installed"
@@ -89,8 +124,59 @@ function providerChip(status: ProviderStatus) {
         size="small"
         variant="outlined"
         color={ok ? "success" : status.installed ? "warning" : "default"}
-        label={problem ? `${providerLabel(status.provider)}: ${problem}` : providerLabel(status.provider)}
+        label={problem ? `${label(status.provider)}: ${problem}` : label(status.provider)}
       />
+    </Tooltip>
+  );
+}
+
+/**
+ * The controller's version, and where it stands against the release Switch names: on it,
+ * waiting for its sessions to end, or stuck, with why. The versions and the reason are on
+ * hover, since a dev build's version is too long to sit in the chip.
+ */
+function controllerVersion(row: Controller) {
+  const running = row.version;
+  const release = row.release;
+  if (release === null || release.current)
+    return (
+      <Tooltip
+        title={
+          release !== null
+            ? `Runs ${release.wanted}, the release Switch names.`
+            : row.kind === "console" || row.status?.controller.updated_by === "console"
+              ? "Updates with Switch Console, which runs it."
+              : "Switch names no controller release for this machine."
+        }
+      >
+        <span>{running ?? EM_DASH}</span>
+      </Tooltip>
+    );
+  const update = row.status?.update;
+  const names = `Runs ${running ?? "an unknown version"}; Switch names ${release.wanted}.`;
+  let chip: { label: string; color: "warning" | "error"; why: string };
+  if (row.state !== "online" || !update || update.target !== release.wanted)
+    chip = {
+      label: "behind",
+      color: "warning",
+      why:
+        row.state === "online"
+          ? "It has said nothing about moving to it: a controller older than self-update never does. Reinstall it once on the machine, or, if Switch Console runs it on an SSH host, update Console."
+          : "It moves to it once it is connected again.",
+    };
+  else if (update.state === "waiting_idle")
+    chip = { label: "updating when idle", color: "warning", why: "It moves to it once no session is running on it." };
+  else if (update.state === "restart_needed")
+    chip = { label: "restart needed", color: "warning", why: update.problem ?? "It installed it; restart it to run it." };
+  else chip = { label: "update failed", color: "error", why: update.problem ?? "It did not say why." };
+  return (
+    <Tooltip title={`${names} ${chip.why}`}>
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ height: "100%", overflow: "hidden" }}>
+        <Typography variant="body2" noWrap>
+          {running ?? EM_DASH}
+        </Typography>
+        <Chip size="small" variant="outlined" color={chip.color} label={chip.label} />
+      </Stack>
     </Tooltip>
   );
 }
@@ -112,6 +198,8 @@ export default function MachinesPage() {
   const [controllers, setControllers] = useState<Controller[] | null>(null);
   const [agents, setAgents] = useState<ManagedAgent[] | null>(null);
   const [operations, setOperations] = useState<Operation[] | null>(null);
+  const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
+  const [providersError, setProvidersError] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ severity: "success" | "error"; text: string } | null>(
     null,
@@ -137,7 +225,7 @@ export default function MachinesPage() {
     } catch (err) {
       setLoadError(
         err instanceof ManagementApiError && err.status === 404 && err.code === "http_error"
-          ? "Agent management is not enabled on this server. An operator turns it on with AGENT_MANAGEMENT_ENABLED."
+          ? "Agent management is not enabled on this server. An operator turns it on by adding agent_management to FEATURE_FLAGS_ENABLED."
           : `Could not load machines and managed agents: ${errorMessage(err)}`,
       );
     }
@@ -148,6 +236,19 @@ export default function MachinesPage() {
     const timer = setInterval(() => void load(), REFRESH_MS);
     return () => clearInterval(timer);
   }, [load]);
+
+  useEffect(() => {
+    fetchProviders().then(setProviders, (err) =>
+      setProvidersError(
+        `Could not load the providers this server runs, so providers show by id: ${errorMessage(err)}`,
+      ),
+    );
+  }, []);
+
+  const label = useCallback(
+    (provider: string) => providerLabel(providers ?? [], provider),
+    [providers],
+  );
 
   const act = useCallback(
     async (what: string, action: () => Promise<unknown>) => {
@@ -199,7 +300,9 @@ export default function MachinesPage() {
         headerName: "State",
         width: 110,
         renderCell: ({ row }) => (
-          <Chip size="small" color={STATE_COLOR[row.state]} label={row.state} />
+          <Tooltip title={stateTitle(row)}>
+            <Chip size="small" color={STATE_COLOR[row.state] ?? "default"} label={row.state} />
+          </Tooltip>
         ),
       },
       {
@@ -208,6 +311,13 @@ export default function MachinesPage() {
         width: 150,
         valueGetter: (_value, row) =>
           row.platform ? `${row.platform.os} ${row.platform.arch}` : EM_DASH,
+      },
+      {
+        field: "version",
+        headerName: "Controller",
+        width: 210,
+        valueGetter: (_value, row) => row.version,
+        renderCell: ({ row }) => controllerVersion(row),
       },
       {
         field: "providers",
@@ -226,9 +336,9 @@ export default function MachinesPage() {
           const missing = row.status.providers.filter((p) => !p.installed);
           return (
             <Stack direction="row" spacing={0.5} alignItems="center" sx={{ height: "100%", overflow: "hidden" }}>
-              {installed.map(providerChip)}
+              {installed.map((status) => providerChip(status, label))}
               {missing.length > 0 && (
-                <Tooltip title={`Not installed: ${missing.map((p) => providerLabel(p.provider)).join(", ")}`}>
+                <Tooltip title={`Not installed: ${missing.map((p) => label(p.provider)).join(", ")}`}>
                   <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: "nowrap" }}>
                     +{missing.length} not installed
                   </Typography>
@@ -245,9 +355,11 @@ export default function MachinesPage() {
         valueGetter: (_value, row) =>
           row.state === "revoked"
             ? "None (revoked)"
-            : row.state === "unknown"
-              ? "Unknown"
-              : row.status
+            : row.state === "offline"
+              ? "Not connected"
+              : row.state === "unknown"
+                ? "Unknown"
+                : row.status
                 ? `${row.status.agents.filter((a) => a.process === "running").length} / ${row.status.agents.length}`
                 : EM_DASH,
       },
@@ -255,9 +367,10 @@ export default function MachinesPage() {
         field: "last_seen_at",
         headerName: "Last seen",
         width: 130,
+        valueGetter: (_value, row) => lastContact(row),
         renderCell: ({ row }) => (
-          <Tooltip title={absoluteTitle(row.last_seen_at)}>
-            <span>{formatRelative(row.last_seen_at)}</span>
+          <Tooltip title={absoluteTitle(lastContact(row))}>
+            <span>{formatRelative(lastContact(row))}</span>
           </Tooltip>
         ),
       },
@@ -325,7 +438,7 @@ export default function MachinesPage() {
         },
       },
     ],
-    [act, busy],
+    [act, busy, label],
   );
 
   const agentColumns = useMemo<GridColDef<ManagedAgent>[]>(
@@ -335,7 +448,7 @@ export default function MachinesPage() {
         field: "provider",
         headerName: "Provider",
         width: 130,
-        valueGetter: (_value, row) => providerLabel(row.definition.provider),
+        valueGetter: (_value, row) => label(row.definition.provider),
       },
       {
         field: "controller_id",
@@ -372,10 +485,16 @@ export default function MachinesPage() {
                 <Chip size="small" label="not running: machine revoked" />
               </Tooltip>
             );
+          if (row.controller_state === "offline")
+            return (
+              <Tooltip title="Its machine is not connected to Switch, so this agent is not reachable. It runs again once the machine's controller is back.">
+                <Chip size="small" color="warning" label="machine offline" />
+              </Tooltip>
+            );
           if (row.controller_state === "unknown")
             return (
-              <Tooltip title="The machine has stopped reporting; this agent's state is not known.">
-                <Chip size="small" color="warning" label="unknown" />
+              <Tooltip title="Its machine has never connected to Switch; this agent's state is not known.">
+                <Chip size="small" label="unknown" />
               </Tooltip>
             );
           if (!row.status)
@@ -483,7 +602,7 @@ export default function MachinesPage() {
         },
       },
     ],
-    [act, busy, controllerName],
+    [act, busy, controllerName, label],
   );
 
   const agentName = useCallback(
@@ -502,7 +621,7 @@ export default function MachinesPage() {
         minWidth: 160,
         valueGetter: (_value, row) =>
           agentName(row.agent_id) ??
-          `${controllerName(row.controller_id)}${row.params.provider ? ` · ${providerLabel(String(row.params.provider))}` : ""}`,
+          `${controllerName(row.controller_id)}${row.params.provider ? ` · ${label(String(row.params.provider))}` : ""}`,
       },
       {
         field: "outcome",
@@ -522,7 +641,7 @@ export default function MachinesPage() {
         ),
       },
     ],
-    [agentName, controllerName],
+    [agentName, controllerName, label],
   );
 
   const recentOperations = useMemo(
@@ -542,13 +661,14 @@ export default function MachinesPage() {
           {loadError}
         </Alert>
       )}
+      {providersError && !loadError && <Alert severity="warning">{providersError}</Alert>}
 
       <Box>
         <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
           <Box>
             <Typography variant="h5">Machines</Typography>
             <Typography variant="body2" color="text.secondary">
-              Computers running an agents controller. Each one runs the agents you place on it
+              Computers running an agent controller. Each one runs the agents you place on it
               and reports what it sees.
             </Typography>
           </Box>
@@ -610,6 +730,7 @@ export default function MachinesPage() {
         open={editing !== null}
         agent={editing === "new" ? null : editing}
         controllers={controllers ?? []}
+        providers={providers ?? []}
         onClose={() => setEditing(null)}
         onSaved={() => void load()}
       />

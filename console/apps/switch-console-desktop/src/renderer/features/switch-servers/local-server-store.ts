@@ -8,6 +8,7 @@ import type {
   DockerAvailability,
   LocalServerStatus,
   ManagedServerUpgrade,
+  StartLocalServerResult,
   SwitchVersionDrift,
 } from '@shared/core/managed-switch-server/managed-switch-server';
 import {
@@ -56,9 +57,10 @@ export class LocalServerStore {
    *  defeat the batching it exists for. */
   /* internal */ pendingLines: string[] = [];
   /* internal */ flushTimer: ReturnType<typeof setTimeout> | null = null;
+  /* internal */ dockerCheck: Promise<void> | null = null;
 
   constructor() {
-    makeAutoObservable(this, { pendingLines: false, flushTimer: false });
+    makeAutoObservable(this, { pendingLines: false, flushTimer: false, dockerCheck: false });
   }
 
   /** Headline and detail as one string, for the modals that have a single slot. */
@@ -100,6 +102,27 @@ export class LocalServerStore {
    * the controls hide the option when it is. */
   get checkoutBuild(): CheckoutBuild | null {
     return this.status?.checkoutBuild ?? null;
+  }
+
+  /** How the server runs, once the main process has read it. */
+  get runtime(): LocalServerStatus['runtime'] {
+    return this.status?.runtime ?? null;
+  }
+
+  /** Whether this machine's server runs without Docker. */
+  get isNative(): boolean {
+    return this.runtime === 'native';
+  }
+
+  /** Whether Mattermost is turned on for a native server. */
+  get mattermost(): boolean {
+    // Never chosen means on wherever Docker can run it.
+    return this.status?.mattermost ?? this.docker?.available ?? false;
+  }
+
+  /** How the Mattermost beside a native server is doing, when known. */
+  get mattermostState(): LocalServerStatus['mattermostState'] {
+    return this.status?.mattermostState ?? null;
   }
 
   get isTransitioning(): boolean {
@@ -160,7 +183,18 @@ export class LocalServerStore {
     this.flushLines();
   }
 
-  async checkDocker(): Promise<void> {
+  /**
+   * One Docker check at a time: the setup step asks on open, on a timer and on
+   * window focus, and a slow older answer must not overwrite a newer one.
+   */
+  checkDocker(): Promise<void> {
+    this.dockerCheck ??= this.detectDocker().finally(() => {
+      this.dockerCheck = null;
+    });
+    return this.dockerCheck;
+  }
+
+  private async detectDocker(): Promise<void> {
     try {
       const docker = await rpc.localSwitchServer.detectDocker();
       runInAction(() => {
@@ -171,7 +205,31 @@ export class LocalServerStore {
     }
   }
 
+  /** Turn Mattermost on or off for a native server; applies at the next start. */
+  async setMattermost(enabled: boolean): Promise<void> {
+    try {
+      await rpc.localSwitchServer.setMattermost(enabled);
+    } catch (cause) {
+      this.setError(cause, 'Could not change the Mattermost setting.');
+    }
+  }
+
   async start(): Promise<void> {
+    await this.runStart(() => rpc.localSwitchServer.start(), 'Could not start the server.');
+  }
+
+  /** Move whatever publishes on `port` to a free port, then start. */
+  async useAnotherPort(port: number): Promise<void> {
+    await this.runStart(
+      () => rpc.localSwitchServer.useAnotherPort(port),
+      'Could not move the server to another port.'
+    );
+  }
+
+  private async runStart(
+    call: () => Promise<StartLocalServerResult>,
+    fallback: string
+  ): Promise<void> {
     this.pendingLines = [];
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
@@ -184,7 +242,7 @@ export class LocalServerStore {
       this.logs = [];
     });
     try {
-      const result = await rpc.localSwitchServer.start();
+      const result = await call();
       if (result.kind === 'docker-unavailable') {
         runInAction(() => {
           this.docker = { available: false, reason: result.reason, detail: result.detail };
@@ -202,7 +260,7 @@ export class LocalServerStore {
         await switchServersStore.init();
       }
     } catch (cause) {
-      this.setError(cause, 'Could not start the server.');
+      this.setError(cause, fallback);
     } finally {
       // The command has finished, so nothing more will arrive to trigger a
       // flush — the tail's last lines are the ones that say how it went.

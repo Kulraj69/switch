@@ -22,17 +22,20 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from switch_core.bridges.agent.commands import room_control_frame
-from switch_core.bridges.agent.protocol.event_buffer import Reader
 from switch_core.bridges.agent.protocol.types import AgentEvent, MessagePayload
+from switch_core.config import ControllerRelease
+from switch_core.db.models import TENANT_ZERO_ID
 from switch_core.db.stores.agent_store import AgentStore
 from switch_core.management import controller_routes
 from switch_core.management.schemas import (
     ControllerConnectionRequest,
+    ControllerInfoRequest,
     EnrollRequest,
     OperationResultRequest,
     StatusReport,
     TokenRequest,
 )
+from tests.db_buffer import say
 from tests.switch_core.management.harness import (
     FIXTURES,
     Harness,
@@ -44,6 +47,7 @@ from tests.switch_core.management.harness import (
     create_managed_agent,
     definition,
     enroll_console,
+    enroll_daemon,
     fixture,
     open_connection,
     open_stream,
@@ -80,9 +84,17 @@ def assert_same_shape(actual: Any, expected: Any, where: str = "$") -> None:
         )
 
 
+CONTROLLER_RELEASE = ControllerRelease(
+    version="0.2.0",
+    url="https://github.com/sandbox-quantum/switch/releases/download/switch-agent-controller-v0.2.0/switch-agent-controller-0.2.0.tgz",
+    sha256="9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+)
+
+
 @pytest.fixture
 def harness(session_factory: async_sessionmaker[AsyncSession]) -> Harness:
-    return build_harness(session_factory)
+    """A release is set, so the fixtures record the fields it adds."""
+    return build_harness(session_factory, controller_release=CONTROLLER_RELEASE)
 
 
 class TestRequestFixturesParse:
@@ -97,6 +109,7 @@ class TestRequestFixturesParse:
         ControllerConnectionRequest.model_validate(
             _fixture("controller_connection_request.json")
         )
+        ControllerInfoRequest.model_validate(_fixture("controller_info_request.json"))
 
 
 class TestEnrollmentAndTokens:
@@ -140,7 +153,7 @@ class TestControllerMessages:
     async def test_assignment_status_and_operations(self, harness: Harness) -> None:
         owner = await add_member(harness.session_factory, "ada")
         async with harness.client() as client:
-            controller = await enroll_console(harness, client, owner)
+            controller = await enroll_daemon(harness, client, owner)
             await report_status(client, controller, 1, providers=[provider("claude")])
             created = await create_managed_agent(
                 client,
@@ -243,6 +256,23 @@ class TestControllerMessages:
         assert refused.json() == _fixture("error_response.json")
 
 
+class TestTheControllersOwnInfo:
+    async def test_set_info(self, harness: Harness) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        async with harness.client() as client:
+            controller = await enroll_daemon(harness, client, owner)
+            await report_status(
+                client, controller, 1, providers=[provider("claude")], agents=[]
+            )
+            updated = await client.patch(
+                f"/v1/management/controllers/{controller.controller_id}",
+                json=_fixture("controller_info_request.json"),
+                headers=controller.headers,
+            )
+        assert updated.status_code == 200, updated.text
+        assert_same_shape(updated.json(), _fixture("controller_info_response.json"))
+
+
 class TestTheControllerConnection:
     async def test_open_and_beat(self, harness: Harness) -> None:
         owner = await add_member(harness.session_factory, "ada")
@@ -260,7 +290,7 @@ class TestTheControllerConnection:
             stream = await open_stream(harness, controller, opened.json())
             await take(stream, 2)
             pong = _fixture("controller_pong.json")
-            beaten = beat(
+            beaten = await beat(
                 harness,
                 controller,
                 connection_id=opened.json()["connection_id"],
@@ -333,19 +363,19 @@ class TestStreamFrames:
             # before a restart), agent.approval_outcome
             provoked += await take(stream, 4)
 
-            # The restart left the room's count unknown; a read through the
-            # head gives it a baseline again, as `read_context` would.
-            binding = presence.binding(agent_id)
-            assert binding is not None
-            buffer = harness.protocol.event_buffer
-            buffer.caught_up(
-                agent_id,
-                Reader(id=presence.holder_id(binding), is_session=False),
+            # Addressed to the agent: the row in the room's log, and the
+            # agent's own event for it. Its missed count runs from where
+            # attaching the agent began counting the room.
+            asked = await say(
+                harness.session_factory,
                 room_id,
-                buffer.head(agent_id),
-                None,
+                "@reviewer can you look at this?",
+                sender="@ada:test",
+                sender_name="Ada",
+                event_id="$event-1",
             )
-            harness.protocol.event_buffer.enqueue(
+            await harness.protocol.event_buffer.enqueue(
+                TENANT_ZERO_ID,
                 agent_id,
                 room_id,
                 AgentEvent(
@@ -360,6 +390,8 @@ class TestStreamFrames:
                         timestamp=0,
                     ),
                 ),
+                room_seq=asked.seq,
+                message_key=asked.transport_event_id,
             )
             provoked += await take(stream, 1)
 
@@ -377,6 +409,9 @@ class TestStreamFrames:
                     requester_name="Ada",
                 ),
             )
+            provoked += await take(stream, 1)
+
+            assert presence.relay_warm(agent_id, room_id)
             provoked += await take(stream, 1)
 
             other_room = await add_room(harness.session_factory, agent_id, name="new")

@@ -18,6 +18,8 @@ from switch_core.bridges.agent.app import create_agent_bridge_app
 from switch_core.bridges.agent.protocol.event_buffer import EventBuffer
 from switch_core.keys import Keyring
 from switch_core.management.controller_routes import router as controller_router
+from switch_core.trust.client import NullTrustClient
+from tests.db_buffer import QuietRooms
 
 _CHART = Path(__file__).resolve().parents[3] / "deploy/remote/helm/switch"
 
@@ -39,6 +41,7 @@ def _config() -> Any:
         oauth_audience = None
         oauth_verify_issuer = True
         id_server_name = "test"
+        service_connections_enabled = True
 
     return _Config()
 
@@ -51,8 +54,7 @@ def _served_prefixes() -> set[str]:
         room_service=object(),  # type: ignore[arg-type]
         client_lifecycle=object(),  # type: ignore[arg-type]
         collab_lifecycle=object(),  # type: ignore[arg-type]
-        event_buffer=EventBuffer(sequence_base=0),
-        task_store=object(),  # type: ignore[arg-type]
+        event_buffer=EventBuffer(object(), sequence_base=0, rooms=QuietRooms()),  # type: ignore[arg-type]
         resource_service=object(),  # type: ignore[arg-type]
         api_key_store=object(),  # type: ignore[arg-type]
         external_user_store=object(),  # type: ignore[arg-type]
@@ -61,9 +63,11 @@ def _served_prefixes() -> set[str]:
         config=_config(),
         approval_outcomes=object(),  # type: ignore[arg-type]
         controller_auth=None,
+        trust_client=NullTrustClient(),
+        gateway_ui=None,
     )
     prefixes = set(_ADDED_IN_MAIN)
-    # The agents controller's routes join the agent bridge app only when agent
+    # The agent controller's routes join the agent bridge app only when agent
     # management is on (`management/wiring.py`), so they are read from their
     # router here.
     for route in [*app.routes, *controller_router.routes]:

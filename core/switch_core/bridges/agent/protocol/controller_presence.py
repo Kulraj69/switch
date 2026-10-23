@@ -1,6 +1,6 @@
 """Controller-backed agents: who runs them, and whether that runner is there.
 
-An agent placed on an agents controller has no connection of its own. Its
+An agent placed on an agent controller has no connection of its own. Its
 controller holds one stream for every agent bound to it, and the agent is
 reachable exactly while that stream is: attached, and beating within the same
 TTL an agent connection beats in (`connections.HEARTBEAT_TTL_SECONDS`). Core
@@ -11,15 +11,27 @@ all, is the controller's business.
 
 Core owns this state and never reads Management's tables. Management fills it
 through the narrow surface at the top of the class (`load`, `bind`, `unbind`,
-`revoke_controller`) at startup and after every change it commits, and each of
-those drops what the controller-token cache (`ControllerAuthCache`) holds for
-the controller or agent it touches. Everything
+`reconcile`, `revoke_controller`) at startup, after every change it commits,
+and when another process signals a change it committed (`management/signals.py`),
+and each of those drops what the controller-token cache (`ControllerAuthCache`)
+holds for the controller or agent it touches. Everything
 else here is read by Core: the presence readers through `AgentConnectionRegistry`,
 the bearer middleware's act-as check, and the controller stream.
 
-Like the connection registry it is memory only. A restart forgets every
-controller connection, and Management loads the bindings again before the
-agent bridge serves.
+A controller's connection lives in the memory of the process holding its
+socket. A restart forgets every controller connection, and Management loads
+the bindings again before the agent bridge serves. Each controller
+connection's transitions, its socket attaching and its socket going (and
+why), are also handed to a ledger, which Management installs (`use_ledger`)
+and which persists them, so that whether a machine is connected can be read
+from any process. Heartbeats are not: they stay here. The ledger is told
+synchronously, as each transition happens, once per transition.
+
+Every other process learns from those rows which process holds each
+controller's live socket (`held_elsewhere`), so an agent run by a controller
+connected anywhere reads as live everywhere, and a connection held here that
+another process has since taken over is closed. Management keeps that, and
+the bindings, in step across processes (`management/signals.py`).
 """
 
 from __future__ import annotations
@@ -32,7 +44,7 @@ import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from switch_core.bridges.agent.protocol.liveness import (
     HEARTBEAT_LAPSED,
@@ -53,6 +65,13 @@ DETACH_DELETED = "deleted"
 REVOKED = Closure(
     code="closed", message="the controller has been revoked", room_id=None
 )
+
+# Why a connection's socket went, as the ledger records it. A connection
+# closed with a closure records the closure's code (`heartbeat_lapsed`,
+# `taken_over`) instead.
+DISCONNECT_REVOKED = "revoked"
+DISCONNECT_SOCKET_CLOSED = "socket_closed"
+DISCONNECT_SERVER_SHUTDOWN = "server_shutdown"
 
 # How many superseded connection ids a controller is remembered by, so a late
 # beat from one is told `taken_over` rather than `unknown_connection`.
@@ -149,8 +168,13 @@ class ControllerConnection:
     stream_token: int = 0
     closure: Closure | None = None
     wake: asyncio.Event = field(default_factory=asyncio.Event)
+    # How far the stream on this connection has sent each attached agent's own
+    # events. A beat's confirmed cursor is lowered to it, in memory, so a beat
+    # costs no database query.
+    sent_cursors: dict[str, int] = field(default_factory=dict)
     # Frames owed to the stream, written on its next pass.
     session_commands: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
+    warms: set[tuple[str, str]] = field(default_factory=set)
     detached: dict[str, str] = field(default_factory=dict)
     rooms_changed: set[str] = field(default_factory=set)
 
@@ -162,6 +186,20 @@ class ControllerConnection:
         )
 
 
+class ControllerConnectionLedger(Protocol):
+    """Where controller connections' transitions are persisted.
+
+    Called as each happens, once each, and must not block. `connected`: a
+    socket attached to a connection that had none. `disconnected`: the
+    socket went, with the reason to record: `socket_closed`,
+    `server_shutdown`, `heartbeat_lapsed`, `taken_over` or `revoked`.
+    """
+
+    def connected(self, conn: ControllerConnection) -> None: ...
+
+    def disconnected(self, conn: ControllerConnection, reason: str) -> None: ...
+
+
 class ControllerPresence:
     def __init__(self, *, on_bound: Callable[[str], None]) -> None:
         # Called with each agent that becomes controller-backed, so the
@@ -169,6 +207,11 @@ class ControllerPresence:
         self._on_bound = on_bound
         self._bindings: dict[str, Binding] = {}
         self._by_controller: dict[str, set[str]] = {}
+        # A count of binding changes, and the count at each agent's last one,
+        # so a reconcile built from a read that started earlier can tell
+        # which agents changed under it (`change_mark`, `reconcile`).
+        self._changes = 0
+        self._changed_at: dict[str, int] = {}
         self._connections: dict[str, ControllerConnection] = {}
         self._superseded: dict[str, deque[str]] = {}
         self._revoked: set[str] = set()
@@ -177,11 +220,57 @@ class ControllerPresence:
         self._rooms: dict[str, set[str]] = {}
         self._next_generation = secrets.randbits(32)
         self._auth_cache: ControllerAuthCache | None = None
+        self._ledger: ControllerConnectionLedger | None = None
+        # Set as the process begins shutting down: a socket going after that
+        # went because the server closed it.
+        self._shutting_down = False
+        # Controllers whose live socket another process holds, and which one,
+        # as Management reads it from their rows. Dropped when that process's
+        # lease lapses (`forget_processes`) or its row says the socket went.
+        self._elsewhere: dict[str, str] = {}
+        # A count of changes to which process holds each controller's
+        # connection, and the count at each controller's last one, as for the
+        # bindings: so a read of the controllers' rows that started earlier
+        # can tell which controllers changed under it (`connection_mark`).
+        self._connection_changes = 0
+        self._connection_changed_at: dict[str, int] = {}
+
+    def connection_mark(self) -> int:
+        """Where the connection changes stand now. Taken before reading the
+        controllers' rows, so what is read is not applied over a change made
+        here since (`connection_changed_since`)."""
+        return self._connection_changes
+
+    def connection_changed_since(self, controller_id: str, mark: int) -> bool:
+        return self._connection_changed_at.get(controller_id, 0) > mark
+
+    def _note_connection_change(self, controller_id: str) -> None:
+        self._connection_changes += 1
+        self._connection_changed_at[controller_id] = self._connection_changes
 
     def use_auth_cache(self, cache: ControllerAuthCache) -> None:
         """The cache of controller-token reads to keep in step with the
         bindings and revocations recorded here."""
         self._auth_cache = cache
+
+    def use_ledger(self, ledger: ControllerConnectionLedger) -> None:
+        """Where each connection's socket attaching and going are persisted."""
+        self._ledger = ledger
+
+    def begin_shutdown(self) -> None:
+        """The process is shutting down: sockets that go from now are
+        recorded as closed by the server."""
+        self._shutting_down = True
+
+    def _record_connected(self, conn: ControllerConnection) -> None:
+        if self._ledger is not None:
+            self._ledger.connected(conn)
+
+    def _record_disconnected(self, conn: ControllerConnection, reason: str) -> None:
+        """Record the socket going, if one was attached: a connection whose
+        socket already went was recorded then."""
+        if conn.stream_attached and self._ledger is not None:
+            self._ledger.disconnected(conn, reason)
 
     def _invalidate_agent_auth(self, agent_id: str) -> None:
         if self._auth_cache is not None:
@@ -198,8 +287,45 @@ class ControllerPresence:
         for binding in bindings:
             self.bind(binding)
 
+    def change_mark(self) -> int:
+        """Where the binding changes stand now. Taken before reading
+        Management's tables for `reconcile`."""
+        return self._changes
+
+    def _note_change(self, agent_id: str) -> None:
+        self._changes += 1
+        self._changed_at[agent_id] = self._changes
+
+    def reconcile(
+        self, bindings: Iterable[Binding], *, agent_ids: Iterable[str], since: int
+    ) -> None:
+        """Make the bindings of `agent_ids` what Management's tables said,
+        changing only what differs: an agent in `agent_ids` with no binding
+        in `bindings` is unbound.
+
+        `bindings` was read after `since` was taken (`change_mark`). An agent
+        this process bound or unbound after that has a newer answer than the
+        read, so it is left as it is: otherwise a re-check that read the
+        tables a moment before a request placed an agent would unbind it
+        again until the next re-check.
+        """
+        wanted = {binding.agent_id: binding for binding in bindings}
+        for agent_id in agent_ids:
+            if self._changed_at.get(agent_id, 0) > since:
+                continue
+            binding = wanted.get(agent_id)
+            if binding is None:
+                if agent_id in self._bindings:
+                    self.unbind(agent_id, DETACH_UNASSIGNED)
+            elif self._bindings.get(agent_id) != binding:
+                self.bind(binding)
+
+    def bound_agent_ids(self) -> set[str]:
+        return set(self._bindings)
+
     def bind(self, binding: Binding) -> None:
         """Bind an agent to a controller, moving it off any other."""
+        self._note_change(binding.agent_id)
         previous = self._bindings.get(binding.agent_id)
         if previous is not None:
             self._forget(previous)
@@ -232,6 +358,7 @@ class ControllerPresence:
 
     def unbind(self, agent_id: str, reason: str) -> None:
         """The agent is no longer controller-backed."""
+        self._note_change(agent_id)
         previous = self._bindings.pop(agent_id, None)
         self._rooms.pop(agent_id, None)
         self._invalidate_agent_auth(agent_id)
@@ -249,6 +376,7 @@ class ControllerPresence:
     def rename_controller(self, controller_id: str, name: str) -> None:
         """The controller's owner renamed it: what its agents' bindings call it."""
         for agent_id in self._by_controller.get(controller_id, set()):
+            self._note_change(agent_id)
             binding = self._bindings[agent_id]
             self._bindings[agent_id] = replace(binding, controller_name=name)
 
@@ -264,6 +392,7 @@ class ControllerPresence:
         conn = self._connections.pop(controller_id, None)
         if conn is not None:
             conn.closure = REVOKED
+            self._record_disconnected(conn, DISCONNECT_REVOKED)
             conn.stream_attached = False
             conn.wake.set()
 
@@ -309,6 +438,12 @@ class ControllerPresence:
             return None
         return conn
 
+    def _connected(self, controller_id: str) -> bool:
+        """Whether the controller's socket is live here or in another process."""
+        return self._live_connection(controller_id) is not None or (
+            controller_id in self._elsewhere and controller_id not in self._revoked
+        )
+
     def is_stopped(self, agent_id: str) -> bool:
         """Bound, and set to stopped by its owner."""
         binding = self._bindings.get(agent_id)
@@ -319,11 +454,16 @@ class ControllerPresence:
         return (
             binding is not None
             and binding.running
-            and self._live_connection(binding.controller_id) is not None
+            and self._connected(binding.controller_id)
         )
 
     def rooms(self, agent_id: str) -> set[str]:
         return set(self._rooms.get(agent_id, ()))
+
+    def rooms_kept(self) -> dict[str, set[str]]:
+        """The rooms this process keeps for each agent a controller streamed
+        from here, the ones `room_joined` and `room_left` change."""
+        return {agent_id: set(rooms) for agent_id, rooms in self._rooms.items()}
 
     def live_in_room(self, agent_id: str, room_id: str) -> bool:
         return self.is_live(agent_id) and room_id in self._rooms.get(agent_id, ())
@@ -337,6 +477,15 @@ class ControllerPresence:
     def live_agent_ids(self) -> set[str]:
         return {agent_id for agent_id in self._bindings if self.is_live(agent_id)}
 
+    def live_agent_ids_held_here(self) -> set[str]:
+        """The live agents whose controller's socket this process holds."""
+        return {
+            agent_id
+            for agent_id, binding in self._bindings.items()
+            if binding.running
+            and self._live_connection(binding.controller_id) is not None
+        }
+
     def live_holder_ids(self) -> set[str]:
         return {
             self.holder_id(binding)
@@ -345,13 +494,91 @@ class ControllerPresence:
         }
 
     def live_connection_count(self) -> int:
+        """The controller connections this process holds that are live."""
         now = time.monotonic()
         return sum(1 for conn in self._connections.values() if conn.is_live(now))
 
+    # ------------------------------------------------------------------
+    # Controllers held by other processes
+    # ------------------------------------------------------------------
+
+    def held_elsewhere(self, controller_id: str, process_id: str | None) -> None:
+        """Which other process holds the controller's live socket, or None
+        when no other process does."""
+        self._note_connection_change(controller_id)
+        if process_id is None:
+            self._elsewhere.pop(controller_id, None)
+        else:
+            self._elsewhere[controller_id] = process_id
+
+    def holder_elsewhere(self, controller_id: str) -> str | None:
+        """The other process holding the controller's live socket, if any."""
+        return self._elsewhere.get(controller_id)
+
+    def process_holding(self, agent_id: str) -> str | None:
+        """The other process holding the live socket of the controller that
+        runs this agent, while the agent is set running."""
+        binding = self._bindings.get(agent_id)
+        if binding is None or not binding.running:
+            return None
+        return self._elsewhere.get(binding.controller_id)
+
+    def processes_elsewhere(self) -> set[str]:
+        return set(self._elsewhere.values())
+
+    def controllers_elsewhere(self) -> set[str]:
+        return set(self._elsewhere)
+
+    def held_elsewhere_count(self) -> int:
+        """How many controllers' live sockets other processes hold."""
+        return sum(
+            1 for controller_id in self._elsewhere if controller_id not in self._revoked
+        )
+
+    def forget_processes(self, process_ids: set[str]) -> set[str]:
+        """These processes' leases lapsed: the controllers they held are not
+        connected. Returns those controllers."""
+        gone = {
+            controller_id
+            for controller_id, process_id in self._elsewhere.items()
+            if process_id in process_ids
+        }
+        for controller_id in gone:
+            self._note_connection_change(controller_id)
+            del self._elsewhere[controller_id]
+        return gone
+
+    def supersede(self, controller_id: str) -> None:
+        """The controller's connection held here was taken over through
+        another process: its stream ends with `taken_over`, and a late beat
+        from it is told so."""
+        self._note_connection_change(controller_id)
+        previous = self._connections.pop(controller_id, None)
+        if previous is not None:
+            self._take_over(previous)
+            logger.info(
+                "[CONTROLLER] controller=%s connection=%s taken over through "
+                "another process",
+                controller_id,
+                previous.id,
+            )
+
+    def _take_over(self, previous: ControllerConnection) -> None:
+        previous.closure = TAKEN_OVER
+        self._record_disconnected(previous, TAKEN_OVER.code)
+        previous.stream_attached = False
+        previous.wake.set()
+        remembered = self._superseded.setdefault(
+            previous.controller_id, deque(maxlen=_SUPERSEDED_REMEMBERED)
+        )
+        remembered.append(previous.id)
+
     def relay_session_command(self, agent_id: str, frame: dict[str, Any]) -> bool:
-        """Queue a session command on the agent's controller stream. False when
-        its controller is not live or the agent is stopped, so the sender is
-        told rather than the command held for a stream that may not return."""
+        """Queue a session command on the agent's controller stream, when this
+        process holds it. False when its controller is not live here or the
+        agent is stopped, so the sender is told rather than the command held
+        for a stream that may not return. A controller held by another process
+        is reached through the registry (`process_holding`)."""
         binding = self._bindings.get(agent_id)
         if binding is None or not binding.running:
             return False
@@ -359,6 +586,22 @@ class ControllerPresence:
         if conn is None:
             return False
         conn.session_commands.append((agent_id, frame))
+        conn.wake.set()
+        return True
+
+    def relay_warm(self, agent_id: str, room_id: str) -> bool:
+        """Ask the agent's controller to start the session a message to
+        `room_id` would start, when this process holds its stream. False when
+        its controller is not live here or the agent is stopped. A warm
+        already owed for the room is not repeated. A controller held by
+        another process is reached through the registry (`process_holding`)."""
+        binding = self._bindings.get(agent_id)
+        if binding is None or not binding.running:
+            return False
+        conn = self._live_connection(binding.controller_id)
+        if conn is None:
+            return False
+        conn.warms.add((agent_id, room_id))
         conn.wake.set()
         return True
 
@@ -386,30 +629,102 @@ class ControllerPresence:
     # The controller's connection
     # ------------------------------------------------------------------
 
+    def new_connection(self) -> tuple[str, int]:
+        """An id and a generation for a connection the controller is opening.
+
+        Drawn before the connection is held (`open`), so the open can be
+        recorded first: a read of the controller's row taken between holding
+        it and recording it would find the connection it replaces still named
+        there, and close the new one as taken over."""
+        generation = self._next_generation
+        self._next_generation += 1
+        return str(uuid.uuid4()), generation
+
     def open(
         self,
         *,
         controller_id: str,
         tenant_id: str,
         resume_cursors: dict[str, int | None],
+        identity: tuple[str, int] | None = None,
     ) -> ControllerConnection:
-        """Open a connection for the controller, taking over any it had."""
+        """Open a connection for the controller, taking over any it had.
+
+        `identity` is the id and generation drawn for it (`new_connection`);
+        a new one is drawn when none is given."""
+        connection_id, generation = identity or self.new_connection()
+        conn = self._hold(
+            controller_id=controller_id,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            generation=generation,
+            resume_cursors=resume_cursors,
+        )
+        logger.info(
+            "[CONTROLLER] opened controller=%s connection=%s generation=%s agents=%d",
+            controller_id,
+            conn.id,
+            generation,
+            len(self.agents_of(controller_id)),
+        )
+        return conn
+
+    def adopt(
+        self,
+        *,
+        controller_id: str,
+        tenant_id: str,
+        connection_id: str,
+        generation: int,
+        resume_cursors: dict[str, int | None],
+    ) -> ControllerConnection:
+        """Hold here a connection another process opened.
+
+        The open and the socket attaching are two requests, and need not
+        reach the same process; nor need a socket reattaching after a drop.
+        The connection's id, generation and cursors are read from its row, so
+        the attach is fenced on what the open handed the controller wherever
+        it lands. The process that held it closes its copy when told.
+        """
+        conn = self._hold(
+            controller_id=controller_id,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            generation=generation,
+            resume_cursors=resume_cursors,
+        )
+        logger.info(
+            "[CONTROLLER] adopted controller=%s connection=%s generation=%s from "
+            "another process",
+            controller_id,
+            connection_id,
+            generation,
+        )
+        return conn
+
+    def _hold(
+        self,
+        *,
+        controller_id: str,
+        tenant_id: str,
+        connection_id: str,
+        generation: int,
+        resume_cursors: dict[str, int | None],
+    ) -> ControllerConnection:
         if controller_id in self._revoked:
             raise ControllerRevokedError(controller_id)
+        self._note_connection_change(controller_id)
         previous = self._connections.get(controller_id)
         if previous is not None:
-            previous.closure = TAKEN_OVER
-            previous.stream_attached = False
-            previous.wake.set()
-            remembered = self._superseded.setdefault(
-                controller_id, deque(maxlen=_SUPERSEDED_REMEMBERED)
-            )
-            remembered.append(previous.id)
+            self._take_over(previous)
+        # Held again here after another process held it: no longer one of
+        # the connections a late beat is told were taken over.
+        remembered = self._superseded.get(controller_id)
+        if remembered is not None and connection_id in remembered:
+            remembered.remove(connection_id)
         now = time.monotonic()
-        generation = self._next_generation
-        self._next_generation += 1
         conn = ControllerConnection(
-            id=str(uuid.uuid4()),
+            id=connection_id,
             controller_id=controller_id,
             tenant_id=tenant_id,
             generation=generation,
@@ -418,13 +733,6 @@ class ControllerPresence:
             opened_at=now,
         )
         self._connections[controller_id] = conn
-        logger.info(
-            "[CONTROLLER] opened controller=%s connection=%s generation=%s agents=%d",
-            controller_id,
-            conn.id,
-            generation,
-            len(self.agents_of(controller_id)),
-        )
         return conn
 
     def require(
@@ -448,8 +756,24 @@ class ControllerPresence:
         """Attach a stream to the connection, displacing any attached before.
 
         Attaching counts as a beat: the stream is what the beat proves alive,
-        and the client cannot beat before it has one.
+        and the client cannot beat before it has one. A connection that had
+        no socket attached is recorded as connected; displacing an attached
+        one changes nothing the ledger holds.
+
+        Refused when the connection is no longer the controller's current one
+        here, as `require` refuses it: the attach was decided on a read of the
+        controller's row, and in the wait the controller may have opened
+        another connection, or this one closed. Attaching then would hold a
+        connection that is over, and forget the process holding the newer one.
         """
+        if not self.is_current(conn):
+            if conn.closure is not None and conn.closure.code == TAKEN_OVER.code:
+                raise ControllerTakenOverError(conn.id)
+            raise UnknownControllerConnectionError(conn.id)
+        if not conn.stream_attached:
+            self._record_connected(conn)
+        self._note_connection_change(conn.controller_id)
+        self._elsewhere.pop(conn.controller_id, None)
         conn.stream_token += 1
         conn.stream_attached = True
         conn.last_beat = time.monotonic()
@@ -457,7 +781,16 @@ class ControllerPresence:
         return conn.stream_token
 
     def detach_stream(self, conn: ControllerConnection, token: int) -> None:
+        """The socket holding this stream went. The connection stays open for
+        the socket to reattach within the heartbeat TTL, but the machine is
+        recorded as disconnected now."""
         if conn.stream_token == token:
+            self._record_disconnected(
+                conn,
+                DISCONNECT_SERVER_SHUTDOWN
+                if self._shutting_down
+                else DISCONNECT_SOCKET_CLOSED,
+            )
             conn.stream_attached = False
 
     def beat(
@@ -476,6 +809,14 @@ class ControllerPresence:
         current = conn.resume_cursors.get(agent_id)
         if current is None or cursor > current:
             conn.resume_cursors[agent_id] = cursor
+
+    def held_connections(self) -> list[ControllerConnection]:
+        """Every controller connection this process holds."""
+        return list(self._connections.values())
+
+    def current_connection(self, controller_id: str) -> ControllerConnection | None:
+        """The controller's open connection, live or not yet swept."""
+        return self._connections.get(controller_id)
 
     def is_current(self, conn: ControllerConnection) -> bool:
         return self._connections.get(conn.controller_id) is conn
@@ -516,6 +857,11 @@ class ControllerPresence:
         conn.session_commands.clear()
         return owed
 
+    def take_warms(self, conn: ControllerConnection) -> list[tuple[str, str]]:
+        owed = sorted(conn.warms)
+        conn.warms.clear()
+        return owed
+
     def _close(self, conn: ControllerConnection, closure: Closure) -> None:
         if self._connections.get(conn.controller_id) is conn:
             del self._connections[conn.controller_id]
@@ -528,6 +874,7 @@ class ControllerPresence:
                 closure.code,
                 conn.beats,
             )
+            self._record_disconnected(conn, closure.code)
         conn.stream_attached = False
         conn.wake.set()
 

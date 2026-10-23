@@ -1,9 +1,16 @@
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmod, mkdir, open, readFile, rename, stat, unlink } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, stat, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { replaceFile } from '@switch-console/agent-providers';
 
 /** The one secret v1 keeps: the long-lived controller credential (`swcc_…`). */
 export const CONTROLLER_CREDENTIAL = 'controller-credential';
+/**
+ * The keypair the provider logins given to this machine are sealed to
+ * (`SealingKeyPair` as JSON); kept only by a store that outlives the process.
+ */
+export const SEALING_KEY = 'sealing-key';
 
 /**
  * Where the controller keeps secrets: a file backend for a controller run on
@@ -14,6 +21,8 @@ export const CONTROLLER_CREDENTIAL = 'controller-credential';
 export interface SecretStore {
   /** Names the backend in logs and `status`. */
   readonly description: string;
+  /** What is set outlives this process. */
+  readonly persistent: boolean;
   /** Logged once when the controller starts, for a backend with a caveat worth stating. */
   startupWarning(): string | null;
   get(name: string): Promise<string | null>;
@@ -29,10 +38,11 @@ const NAME = /^[a-z0-9-]+$/;
  * controller user's files can read them.
  */
 export class FileSecretStore implements SecretStore {
+  readonly persistent = true;
   readonly description: string;
 
   constructor(private readonly dir: string) {
-    this.description = `plaintext files in ${dir} (mode 0600)`;
+    this.description = `plaintext files in ${dir} (${process.platform === 'win32' ? 'readable by this user only' : 'mode 0600'})`;
   }
 
   startupWarning(): string {
@@ -70,7 +80,7 @@ export class FileSecretStore implements SecretStore {
     } finally {
       await file.close();
     }
-    await rename(temporary, path);
+    await replaceFile(temporary, path);
   }
 
   async delete(name: string): Promise<void> {
@@ -93,6 +103,7 @@ export class FileSecretStore implements SecretStore {
  * the parent is told of a revocation by the exit code.
  */
 export class MemorySecretStore implements SecretStore {
+  readonly persistent = false;
   readonly description: string;
   private readonly values: Map<string, string>;
 
@@ -119,4 +130,197 @@ export class MemorySecretStore implements SecretStore {
   async delete(name: string): Promise<void> {
     this.values.delete(name);
   }
+}
+
+/** Where `enroll` keeps the controller credential; recorded in the store so `run` reads it there. */
+export const SECRET_STORE_KINDS = ['file', 'keychain', 'secret-service'] as const;
+export type SecretStoreKind = (typeof SECRET_STORE_KINDS)[number];
+
+export function isSecretStoreKind(value: string): value is SecretStoreKind {
+  return (SECRET_STORE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Runs a command with `input` on stdin; rejects with a {@link CommandFailure}
+ * when it exits non-zero.
+ */
+export type CommandRunner = (
+  file: string,
+  args: string[],
+  input: string | null
+) => Promise<{ stdout: string }>;
+
+export const runCommand: CommandRunner = (file, args, input) =>
+  new Promise((resolve, reject) => {
+    const child = execFile(file, args, { timeout: 15_000 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(new CommandFailure(file, args, error.code, stderr.trim(), error.message));
+        return;
+      }
+      resolve({ stdout });
+    });
+    // A command that exits without reading its input closes the pipe first;
+    // its exit status says how it went, not the write.
+    child.stdin?.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code !== 'EPIPE') reject(error);
+    });
+    child.stdin?.end(input ?? '');
+  });
+
+/** A command that exited non-zero, or could not be run (`code` is then a string such as `ENOENT`). */
+export class CommandFailure extends Error {
+  constructor(
+    file: string,
+    args: string[],
+    readonly code: number | string | null | undefined,
+    readonly stderr: string,
+    detail: string
+  ) {
+    super(`${file} ${args[0] ?? ''} failed: ${stderr || detail}`);
+    this.name = 'CommandFailure';
+  }
+}
+
+const SERVICE = 'switch-agent-controller';
+
+/** One keychain entry per secret and data directory, so two controllers on one account do not share. */
+function account(dataDir: string, name: string): string {
+  if (!NAME.test(name)) throw new Error(`Invalid secret name '${name}'.`);
+  return `${name}@${dataDir}`;
+}
+
+/**
+ * The macOS login keychain, through `security`. The value is written through
+ * `security -i` on stdin, never on the command line, where other processes
+ * could read it.
+ */
+export class KeychainSecretStore implements SecretStore {
+  readonly persistent = true;
+  readonly description = 'the macOS login keychain';
+
+  constructor(
+    private readonly dataDir: string,
+    private readonly run: CommandRunner
+  ) {}
+
+  startupWarning(): null {
+    return null;
+  }
+
+  async get(name: string): Promise<string | null> {
+    try {
+      const { stdout } = await this.run(
+        'security',
+        ['find-generic-password', '-s', SERVICE, '-a', account(this.dataDir, name), '-w'],
+        null
+      );
+      return stdout.trim();
+    } catch (error) {
+      // 44: errSecItemNotFound.
+      if (error instanceof CommandFailure && error.code === 44) return null;
+      throw error;
+    }
+  }
+
+  async set(name: string, value: string): Promise<void> {
+    if (/["\\\n]/.test(value)) throw new Error('This secret cannot be stored in the keychain.');
+    const command = `add-generic-password -U -s ${SERVICE} -a "${account(this.dataDir, name)}" -w "${value}"\n`;
+    await this.run('security', ['-i'], command);
+  }
+
+  async delete(name: string): Promise<void> {
+    try {
+      await this.run(
+        'security',
+        ['delete-generic-password', '-s', SERVICE, '-a', account(this.dataDir, name)],
+        null
+      );
+    } catch (error) {
+      if (!(error instanceof CommandFailure && error.code === 44)) throw error;
+    }
+  }
+}
+
+/**
+ * The desktop keyring on Linux (GNOME Keyring, KWallet) through libsecret's
+ * `secret-tool`, which reads the value from stdin. It needs a session bus and
+ * an unlocked keyring, which a service started at boot usually lacks; that is
+ * why it is chosen only when asked for.
+ */
+export class SecretServiceStore implements SecretStore {
+  readonly persistent = true;
+  readonly description = 'the desktop keyring (Secret Service)';
+
+  constructor(
+    private readonly dataDir: string,
+    private readonly run: CommandRunner
+  ) {}
+
+  startupWarning(): null {
+    return null;
+  }
+
+  async get(name: string): Promise<string | null> {
+    const attributes = ['service', SERVICE, 'account', account(this.dataDir, name)];
+    try {
+      const { stdout } = await this.run('secret-tool', ['lookup', ...attributes], null);
+      return stdout.trim() || null;
+    } catch (error) {
+      // `lookup` exits 1, saying nothing, when there is no such secret.
+      if (error instanceof CommandFailure && error.code === 1 && error.stderr === '') return null;
+      throw error;
+    }
+  }
+
+  async set(name: string, value: string): Promise<void> {
+    await this.run(
+      'secret-tool',
+      [
+        'store',
+        '--label',
+        'Switch agent controller',
+        'service',
+        SERVICE,
+        'account',
+        account(this.dataDir, name),
+      ],
+      value
+    );
+  }
+
+  async delete(name: string): Promise<void> {
+    await this.run(
+      'secret-tool',
+      ['clear', 'service', SERVICE, 'account', account(this.dataDir, name)],
+      null
+    );
+  }
+}
+
+/**
+ * The store a data directory's credential lives in. `dir` is the file
+ * backend's directory; `dataDir` keys keychain entries.
+ */
+export function secretStoreFor(
+  kind: SecretStoreKind,
+  paths: { dir: string; dataDir: string },
+  run: CommandRunner
+): SecretStore {
+  switch (kind) {
+    case 'file':
+      return new FileSecretStore(paths.dir);
+    case 'keychain':
+      return new KeychainSecretStore(paths.dataDir, run);
+    case 'secret-service':
+      return new SecretServiceStore(paths.dataDir, run);
+  }
+}
+
+/**
+ * What `enroll` uses when not told: the macOS keychain on a Mac, where the
+ * service runs in the user's session and can read it; files elsewhere, since
+ * a Linux service usually starts with no keyring to unlock.
+ */
+export function defaultSecretStoreKind(platform: NodeJS.Platform): SecretStoreKind {
+  return platform === 'darwin' ? 'keychain' : 'file';
 }

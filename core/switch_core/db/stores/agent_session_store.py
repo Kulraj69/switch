@@ -1,3 +1,4 @@
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, literal_column, select, update
@@ -45,7 +46,7 @@ class AgentSessionStore:
     # event handling, while a genuinely crashed agent still drops within 90s.
     ALWAYS_ON_TTL = timedelta(seconds=90)
 
-    # session_addressable agents (the Claude Code plugin) renew their heartbeat
+    # session_addressable agents on the old Claude Code plugin renew their heartbeat
     # on a dedicated fast cadence (POST /connection/renew every 2s from the
     # channel process), decoupled from polling. A much lower TTL is therefore
     # safe and desirable: a closed/crashed session drops to "no session" within
@@ -154,7 +155,7 @@ class AgentSessionStore:
         session-close signal, so the binding lingers after a session ends.
         Paired with a liveness check by the caller: a binding present while the
         agent is not live means a session_addressable session is connected but
-        not reporting in (e.g. launched without the dev-channels flag).
+        not reporting in.
         """
         result = await session.execute(
             select(AgentSession.agent_id)
@@ -237,3 +238,30 @@ class AgentSessionStore:
             .where(AgentSession.last_seen_at > cutoff)
         )
         return set(result.scalars().all())
+
+    async def live_agent_ids_by_room(
+        self,
+        session: AsyncSession,
+        agent_ids: Collection[str],
+        room_ids: Collection[str],
+    ) -> dict[str, set[str]]:
+        """`get_live_agent_ids` for many concrete rooms in one query.
+
+        Keyed by room id; a room where none of `agent_ids` is live has no key.
+        Room-scoped rows only, under `SESSION_TTL`, exactly as
+        `get_live_agent_ids` reads one room.
+        """
+        if not agent_ids or not room_ids:
+            return {}
+        cutoff = datetime.now(UTC) - self.SESSION_TTL
+        result = await session.execute(
+            select(AgentSession.room_id, AgentSession.agent_id)
+            .where(AgentSession.agent_id.in_(agent_ids))
+            .where(AgentSession.room_id.in_(room_ids))
+            .where(AgentSession.lifecycle == "heartbeat")
+            .where(AgentSession.last_seen_at > cutoff)
+        )
+        by_room: dict[str, set[str]] = {}
+        for room_id, agent_id in result.all():
+            by_room.setdefault(room_id, set()).add(agent_id)
+        return by_room

@@ -5,7 +5,7 @@ import { db } from '@main/db/client';
 import { appSettings } from '@main/db/schema';
 
 /**
- * The Console agents that were moved onto an agents controller ("Move to
+ * The Console agents that were moved onto an agent controller ("Move to
  * managed"), keyed by Console agent id.
  *
  * While an agent is here, Console does not run its watcher: boot, a restored
@@ -131,9 +131,7 @@ export async function managedRecordFor(
 /** Thrown where Console would start the watcher of an agent a controller runs. */
 export class AgentManagedByControllerError extends Error {
   constructor(name: string) {
-    super(
-      `${name} runs on a managed machine now, so Console does not run it. Use Stop managing on the agent to bring it back to this Console.`
-    );
+    super(`${name} runs on a managed machine now: Switch runs it there, not this Console.`);
     this.name = 'AgentManagedByControllerError';
   }
 }

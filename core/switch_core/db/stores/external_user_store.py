@@ -1,10 +1,11 @@
+from collections.abc import Collection
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from switch_core.db.models import ClientRoom, ExternalUser, ExternalUserClaim
+from switch_core.db.models import Client, ClientRoom, ExternalUser, ExternalUserClaim
 
 
 class ExternalUserStore:
@@ -12,6 +13,22 @@ class ExternalUserStore:
         session.add(user)
         await session.flush()
         return user
+
+    async def is_bridge_user(
+        self, session: AsyncSession, bridge_id: str, transport_user_id: str
+    ) -> bool:
+        """Whether `transport_user_id` is the human actor of a person on this
+        bridge."""
+        result = await session.execute(
+            select(ExternalUser.id)
+            .join(Client, Client.id == ExternalUser.client_id)
+            .where(
+                ExternalUser.bridge_id == bridge_id,
+                Client.transport_user_id == transport_user_id,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def get(self, session: AsyncSession, user_id: str) -> ExternalUser | None:
         return await session.get(ExternalUser, user_id)
@@ -45,6 +62,17 @@ class ExternalUserStore:
     ) -> list[ExternalUser]:
         result = await session.execute(
             select(ExternalUser).where(ExternalUser.bridge_id == bridge_id)
+        )
+        return list(result.scalars().all())
+
+    async def get_by_bridges(
+        self, session: AsyncSession, bridge_ids: Collection[str]
+    ) -> list[ExternalUser]:
+        """`get_by_bridge` for several bridges in one query."""
+        if not bridge_ids:
+            return []
+        result = await session.execute(
+            select(ExternalUser).where(ExternalUser.bridge_id.in_(bridge_ids))
         )
         return list(result.scalars().all())
 

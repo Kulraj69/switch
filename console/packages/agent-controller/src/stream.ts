@@ -3,8 +3,10 @@ import type { z } from 'zod';
 import {
   ControllerApiError,
   type ControllerClient,
+  isCredentialRefused,
   isRevoked,
   isTakenOver,
+  isUpgradeRequired,
   type OpenedSocket,
 } from './api';
 import { errorMessage, type Logger } from './log';
@@ -24,6 +26,8 @@ import {
   agentRoomsFrameSchema,
   type AgentSessionCommandFrame,
   agentSessionCommandFrameSchema,
+  type AgentWarmFrame,
+  agentWarmFrameSchema,
   assignmentChangedSchema,
   type ConnectionState,
   connectionStateSchema,
@@ -42,6 +46,7 @@ export const STREAM_FRAME_SCHEMAS = {
   'agent.event': agentEventFrameSchema,
   'agent.gap': agentGapFrameSchema,
   'agent.session_command': agentSessionCommandFrameSchema,
+  'agent.warm': agentWarmFrameSchema,
   'agent.approval_outcome': agentApprovalOutcomeFrameSchema,
   'agent.attached': agentAttachedFrameSchema,
   'agent.detached': agentDetachedFrameSchema,
@@ -57,6 +62,7 @@ export type ControllerFrame =
   | { type: 'agent.event'; data: AgentEventFrame }
   | { type: 'agent.gap'; data: AgentGapFrame }
   | { type: 'agent.session_command'; data: AgentSessionCommandFrame }
+  | { type: 'agent.warm'; data: AgentWarmFrame }
   | { type: 'agent.approval_outcome'; data: AgentApprovalOutcomeFrame }
   | { type: 'agent.attached'; data: AgentAttachedFrame }
   | { type: 'agent.detached'; data: AgentDetachedFrame }
@@ -66,7 +72,12 @@ export type ControllerFrame =
   | { type: 'credential.revoked'; data: Record<string, never> };
 
 /** Why the stream stopped for good. */
-export type StreamEnding = 'stopped' | 'revoked' | 'taken_over';
+export type StreamEnding =
+  | 'stopped'
+  | 'revoked'
+  | 'taken_over'
+  | 'upgrade_required'
+  | 'credential_invalid';
 
 export type ControllerStreamOptions = {
   client: Pick<ControllerClient, 'openConnection' | 'openSocket'>;
@@ -151,8 +162,11 @@ type Message = { event: string; data: unknown };
  * Ends with `'revoked'` on `credential.revoked` or a refusal saying
  * `controller_revoked`, with `'taken_over'` when another instance of this
  * controller took the connection over (an `evicted` frame or a refusal saying
- * so: reopening would take it straight back, so this one stops), and with
- * `'stopped'` when `signal` fires. Any other `evicted` opens a new connection.
+ * so: reopening would take it straight back, so this one stops), with
+ * `'upgrade_required'` when the server refuses this controller's protocol and
+ * `'credential_invalid'` when it knows no controller by this credential (the
+ * server marks both not retryable, and retrying them used to spin forever),
+ * and with `'stopped'` when `signal` fires. Any other `evicted` opens a new connection.
  */
 export function runControllerStream(options: ControllerStreamOptions): Promise<StreamEnding> {
   return new ControllerStream(options).run();
@@ -184,6 +198,8 @@ class ControllerStream {
         if (!attempt.ending && !signal.aborted) {
           if (isRevoked(error)) attempt.ending = 'revoked';
           else if (isTakenOver(error)) attempt.ending = 'taken_over';
+          else if (isUpgradeRequired(error)) attempt.ending = 'upgrade_required';
+          else if (isCredentialRefused(error)) attempt.ending = 'credential_invalid';
           else {
             const reason = attempt.abort.signal.reason;
             failure = errorMessage(reason instanceof IdleTimeout ? reason : error);

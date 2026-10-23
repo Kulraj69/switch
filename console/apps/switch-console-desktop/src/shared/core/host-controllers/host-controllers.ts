@@ -1,7 +1,7 @@
 import type { PlacedManagedAgent } from '@shared/core/embedded-controller/embedded-controller';
 
 /**
- * An SSH host as a machine: the headless agents controller Console installs
+ * An SSH host as a machine: the headless agent controller Console installs
  * and runs there, enrolled with one Switch server, so that server's agent
  * management can run agents on the host.
  */
@@ -34,7 +34,10 @@ export type HostControllerProcess =
 export type HostControllerRemote =
   | {
       kind: 'ok';
-      controller: { state: 'online' | 'unknown' | 'revoked'; lastSeenAt: string | null } | null;
+      controller: {
+        state: 'online' | 'offline' | 'unknown' | 'revoked';
+        lastSeenAt: string | null;
+      } | null;
       agents: PlacedManagedAgent[];
     }
   | { kind: 'unavailable' }

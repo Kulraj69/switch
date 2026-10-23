@@ -278,6 +278,44 @@ class RoomRoleStore:
         )
         return result.scalar_one_or_none()
 
+    async def room_role_names(
+        self,
+        session: AsyncSession,
+        room_id: str,
+        live_connection_ids: Collection[str],
+    ) -> dict[str, str]:
+        """`agent_room_role` for every agent in one room, in one query: the role
+        name each agent live-holds there, keyed by agent id. An agent holding
+        none has no key."""
+        result = await session.execute(
+            select(RoleLease.agent_id, RoomRole.name)
+            .join(RoleLease, RoleLease.role_id == RoomRole.id)
+            .where(RoleLease.room_id == room_id)
+            .where(self._live(live_connection_ids))
+        )
+        return {agent_id: name for agent_id, name in result.all()}
+
+    async def agent_room_roles(
+        self,
+        session: AsyncSession,
+        agent_id: str,
+        room_ids: Collection[str],
+        live_connection_ids: Collection[str],
+    ) -> dict[str, str]:
+        """`agent_room_role` for many rooms in one query: the role name the
+        agent live-holds in each, keyed by room id. A room where it holds
+        none has no key."""
+        if not room_ids:
+            return {}
+        result = await session.execute(
+            select(RoleLease.room_id, RoomRole.name)
+            .join(RoleLease, RoleLease.role_id == RoomRole.id)
+            .where(RoleLease.room_id.in_(room_ids))
+            .where(RoleLease.agent_id == agent_id)
+            .where(self._live(live_connection_ids))
+        )
+        return {room_id: name for room_id, name in result.all()}
+
     async def acquire_lease(
         self,
         session: AsyncSession,

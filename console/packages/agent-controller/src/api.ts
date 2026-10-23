@@ -7,7 +7,10 @@ import {
   type Assignment,
   assignmentSchema,
   type ControllerConnection,
+  type ControllerInfo,
+  type ControllerInfoChange,
   controllerConnectionResponseSchema,
+  controllerInfoResponseSchema,
   credentialRotateResponseSchema,
   type EnrollRequest,
   type EnrollResponse,
@@ -17,6 +20,9 @@ import {
   operationListSchema,
   type OperationResult,
   operationSchema,
+  type Provider,
+  type SealedLoginResponse,
+  sealedLoginResponseSchema,
   PROTOCOL_VERSION,
   type StatusReport,
   type StatusResponse,
@@ -49,7 +55,7 @@ export const nodeWebSocket: OpenWebSocket = (url, headers) => {
   ).WebSocket;
   if (!Socket)
     throw new ConfigurationError(
-      `The agents controller needs Node 22 or newer to connect to Switch (this is ${process.version}, with no WebSocket).`
+      `The agent controller needs Node 22 or newer to connect to Switch (this is ${process.version}, with no WebSocket).`
     );
   return new Socket(url, { headers });
 };
@@ -86,6 +92,23 @@ export function isRevoked(error: unknown): boolean {
 /** Another instance of this controller took its stream connection over: terminal for this one. */
 export function isTakenOver(error: unknown): boolean {
   return error instanceof ControllerApiError && error.code === 'taken_over';
+}
+
+/**
+ * The server does not speak this controller's protocol. Retrying cannot change
+ * that: only a newer controller can, so this one stops and says so.
+ */
+export function isUpgradeRequired(error: unknown): boolean {
+  return error instanceof ControllerApiError && error.code === 'protocol_unsupported';
+}
+
+/**
+ * The server knows no controller by this credential: it was replaced, or the
+ * key behind it was deleted. Retrying the same credential cannot pass, so this
+ * one stops; the machine has to be enrolled again.
+ */
+export function isCredentialRefused(error: unknown): boolean {
+  return error instanceof ControllerApiError && error.code === 'invalid_credential';
 }
 
 /**
@@ -350,6 +373,58 @@ export class ControllerClient {
       }
       throw error;
     }
+  }
+
+  /** Renames this machine and/or changes its description, as its owner can in the gateway. */
+  async updateInfo(change: ControllerInfoChange): Promise<ControllerInfo> {
+    let response: Response;
+    try {
+      response = await this.request(this.controllerPath, { method: 'PATCH', body: change });
+    } catch (error) {
+      // A server from before this route answers with the framework's own
+      // refusal, which carries no Switch error envelope.
+      if (
+        error instanceof ControllerApiError &&
+        (error.status === 404 || error.status === 405) &&
+        error.code === 'unexpected_response'
+      )
+        throw new ControllerApiError(
+          error.status,
+          'not_supported',
+          "This Switch server cannot rename a machine from its controller. Change the name and description in the gateway's Machines page instead.",
+          false,
+          null
+        );
+      throw error;
+    }
+    return parsed(response, controllerInfoResponseSchema);
+  }
+
+  /**
+   * Registers the key this machine's provider logins are sealed to. A server
+   * already holding another key for it refuses (409): the machine must be
+   * enrolled again to get a new one.
+   */
+  async registerPublicKey(publicKey: string): Promise<void> {
+    await this.request(this.controllerPath, {
+      method: 'PATCH',
+      body: { public_key: { alg: 'X25519', key: publicKey } },
+    });
+  }
+
+  /** The provider login given to this machine, still sealed; null when none was given. */
+  async sealedLogin(provider: Provider): Promise<SealedLoginResponse | null> {
+    const response = await this.request(
+      `${this.controllerPath}/provider-credentials/${encodeURIComponent(provider)}`,
+      { method: 'GET' },
+      (status) => status === 200 || status === 404
+    );
+    if (response.status === 404) {
+      const error = await failure(response);
+      if (error.code === 'provider_login_missing') return null;
+      throw error;
+    }
+    return parsed(response, sealedLoginResponseSchema);
   }
 
   async rotateCredential(): Promise<string> {

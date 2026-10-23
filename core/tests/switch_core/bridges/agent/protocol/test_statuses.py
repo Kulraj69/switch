@@ -12,6 +12,7 @@ from switch_core.bridges.agent.protocol.agent_connections import (
     AgentConnectionRegistry,
     ClientDeclaration,
 )
+from switch_core.bridges.agent.protocol.positions import OWN_EVENTS
 from switch_core.bridges.agent.protocol.statuses import compute_agent_statuses
 from switch_core.bridges.agent.protocol.types import AgentStatus
 
@@ -43,6 +44,15 @@ class _FakeSessionStore:
         self.calls.append((list(agent_ids), room_id))
         return {aid for aid in agent_ids if aid in self._live}
 
+    async def live_agent_ids_by_room(
+        self, _session: Any, agent_ids: list[str], room_ids: list[str]
+    ) -> dict[str, set[str]]:
+        by_room: dict[str, set[str]] = {}
+        for room_id in room_ids:
+            self.calls.append((list(agent_ids), room_id))
+            by_room[room_id] = {aid for aid in agent_ids if aid in self._live}
+        return by_room
+
 
 def _registry(
     *,
@@ -60,7 +70,7 @@ def _registry(
             scope=scope,  # type: ignore[arg-type]
             delivery_filter="all",
             spawn_capable=spawn_capable,
-            cursor=0,
+            position={OWN_EVENTS: 0},
             declaration=ClientDeclaration(speaks=PROTOCOL_VERSION),
             expected_generation=None,
         )
@@ -271,6 +281,11 @@ class TestPresenceIsAUnion:
                 self, _session: Any, agent_ids: list[str], room_id: str | None
             ) -> set[str]:
                 return set(agent_ids) if room_id is None else set()
+
+            async def live_agent_ids_by_room(
+                self, _session: Any, agent_ids: list[str], room_ids: list[str]
+            ) -> dict[str, set[str]]:
+                return {}
 
         agents = [_agent("auto", "auto_session")]
 

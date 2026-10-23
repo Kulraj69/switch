@@ -69,6 +69,10 @@ export type TelemetryAgentCreateFailure =
    */
   | 'not_configured'
   | 'agent_not_on_server'
+  /** A managed agent Switch would not place on the machine. */
+  | 'refused'
+  /** A managed agent whose own fields Switch rejected: its name, description or settings. */
+  | 'invalid'
   | 'error';
 
 export type TelemetrySessionStartFailure =
@@ -159,21 +163,21 @@ export type TelemetryCliFailure =
 declare const durationMsBrand: unique symbol;
 export type TelemetryDurationMs = number & { readonly [durationMsBrand]: true };
 
+declare const platformKeyBrand: unique symbol;
+
 /**
  * Which messaging platform a room or bridge is on.
  *
  * The server names the platform as free text, so this is narrowed at the emitter
- * rather than trusted — the same treatment provider ids get. `other` is a
- * platform we do not know about, `unknown` is one we could not read.
+ * rather than trusted (see `bridgePlatformOfType`): a platform key a server
+ * listed as one of its registered platforms, `other` for a platform we cannot
+ * vouch for, `unknown` for one we could not read. Branded so only the narrowing
+ * produces one.
  */
 export type TelemetryBridgePlatform =
-  | 'slack'
-  | 'mattermost'
-  | 'discord'
-  | 'teams'
-  | 'telegram'
   | 'other'
-  | 'unknown';
+  | 'unknown'
+  | (string & { readonly [platformKeyBrand]: true });
 
 /**
  * What asked for an update check.
@@ -194,6 +198,9 @@ export type TelemetryRoomCreateFailure =
   | 'invalid'
   | 'unreachable'
   | 'error';
+
+/** How a room came to be made: the Create room dialog, or a template run. */
+export type TelemetryRoomCreateSource = 'dialog' | 'template';
 
 /** How someone signed in. Not a setting — which of the two forms they used. */
 export type TelemetryAuthMethod = 'password' | 'oidc' | 'signup';
@@ -469,6 +476,7 @@ export type TelemetryEventMap = {
   /**
    * A room was created on a server. `bridge_unavailable` is the failure worth
    * watching: it means the messaging platform, not the app, refused.
+   * A template run reports each room it made, and nothing when it fails.
    */
   room_created: {
     server_kind: TelemetryServerKind;
@@ -477,6 +485,7 @@ export type TelemetryEventMap = {
     has_instructions: boolean;
     outcome: TelemetryOutcome;
     failure_reason: TelemetryRoomCreateFailure;
+    source: TelemetryRoomCreateSource;
   };
   room_deleted: {
     server_kind: TelemetryServerKind;
@@ -544,6 +553,9 @@ export type TelemetryEventMap = {
   onboarding_checklist_dismissed: RendererTelemetryEvents['onboarding_checklist_dismissed'];
   onboarding_completed: RendererTelemetryEvents['onboarding_completed'];
   add_server_step: RendererTelemetryEvents['add_server_step'];
+  onboarding_page: RendererTelemetryEvents['onboarding_page'];
+  buddy_step: RendererTelemetryEvents['buddy_step'];
+  buddy_message_sent: RendererTelemetryEvents['buddy_message_sent'];
   /** A screen failed. A count, with nothing of what failed or where. */
   renderer_crashed: RendererTelemetryEvents['renderer_crashed'];
   /**
@@ -649,6 +661,7 @@ export const TELEMETRY_EVENT_PROPERTIES = {
     'has_instructions',
     'outcome',
     'failure_reason',
+    'source',
   ],
   room_deleted: ['server_kind', 'outcome'],
   room_agents_added: ['agent_count', 'direction'],
@@ -665,6 +678,9 @@ export const TELEMETRY_EVENT_PROPERTIES = {
   onboarding_checklist_dismissed: [],
   onboarding_completed: [],
   add_server_step: ['step', 'choice', 'first_run'],
+  onboarding_page: ['page', 'path'],
+  buddy_step: ['action', 'provider'],
+  buddy_message_sent: ['nth'],
   renderer_crashed: [],
   telemetry_consent_changed: ['source', 'install_kind'],
   session_attached: ['agent_type', 'outcome'],

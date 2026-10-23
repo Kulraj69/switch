@@ -6,12 +6,14 @@ out/
 
 # The connection-model benchmark's own bundle of its host entrypoint.
 packages/*/dist-bench/
+packages/*/dist-package/
 
 # App-specific outputs
 apps/*/out/
 apps/*/release/
 apps/*/dist/
 apps/*/dist-sidecar/
+apps/*/dist-local-server/
 
 # Re-include Electron packaging/signing assets. The monorepo root .gitignore
 # globally ignores build/, which would otherwise drop these tracked files.

@@ -10,6 +10,7 @@ from switch_core.bridges.collaboration import (
 )
 from switch_core.bridges.collaboration.collaboration_core import CollaborationCore
 from switch_core.bridges.collaboration.models import InboundMessage
+from switch_core.trust.client import NullTrustClient
 
 # CHOO-1781: the first message from a channel member not yet known to the room
 # must not be dropped. Provisioning invites the external user's human actor and
@@ -46,6 +47,7 @@ class _FakeHumanActor:
     """Stands in for a Actor human actor whose join lands after the invite."""
 
     def __init__(self) -> None:
+        self.client_id = "alice-client"
         self.transport_user_id = "@ext_alice:switch.local"
         self._joined = asyncio.Event()
         self.sent: list[tuple[str, str]] = []
@@ -193,6 +195,7 @@ async def test_first_message_from_app_sender_is_relayed() -> None:
         return await CollaborationCore._ensure_human_in_room(inner, **kwargs)  # type: ignore[arg-type]
 
     bridge = SimpleNamespace(
+        _bridge_id="bridge-1",
         _repair_placeholder_username=_noop_repair,
         _is_registered_agent=_is_registered_agent,
         _ensure_human_in_room=_ensure_human_in_room,
@@ -201,6 +204,7 @@ async def test_first_message_from_app_sender_is_relayed() -> None:
         _handle_text_answer=_no_text_answer,
         _channel_to_room={"chan-1": ("room-uuid", TRANSPORT_ROOM_ID)},
         _channel_locks={},
+        _trust_client=NullTrustClient(),
     )
 
     await CollaborationCore._handle_inbound_message(
@@ -238,6 +242,7 @@ async def test_first_message_from_unknown_member_is_relayed() -> None:
         relayed.append((kwargs["transport_event_id"], kwargs["external_post_id"]))
 
     bridge = SimpleNamespace(
+        _bridge_id="bridge-1",
         _repair_placeholder_username=_noop_repair,
         _is_registered_agent=_is_registered_agent,
         _ensure_human_in_room=_ensure_human_in_room,
@@ -246,6 +251,7 @@ async def test_first_message_from_unknown_member_is_relayed() -> None:
         _handle_text_answer=_no_text_answer,
         _channel_to_room={"chan-1": ("room-uuid", TRANSPORT_ROOM_ID)},
         _channel_locks={},
+        _trust_client=NullTrustClient(),
     )
 
     await CollaborationCore._handle_inbound_message(

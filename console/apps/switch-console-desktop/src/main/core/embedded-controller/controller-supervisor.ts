@@ -1,11 +1,27 @@
+import { randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
+import {
+  isProviderRecheckReply,
+  PROVIDER_RECHECK_KIND,
+  type ProviderRecheckRequest,
+  STOP_MESSAGE,
+} from '@switch-console/agent-providers';
 import type { EmbeddedControllerPhase } from '@shared/core/embedded-controller/embedded-controller';
 
 /** The controller's exit codes (see the agent-controller README). */
 export const EXIT_CONFIGURATION = 2;
 export const EXIT_REVOKED = 3;
 export const EXIT_TAKEN_OVER = 4;
+export const EXIT_UPGRADE_REQUIRED = 5;
+export const EXIT_CREDENTIAL_INVALID = 6;
+
+/** How the controller ended when it must not be started again as it is. */
+export type ControllerFinalExit =
+  | 'revoked'
+  | 'taken_over'
+  | 'upgrade_required'
+  | 'credential_invalid';
 
 /** The part of a spawned `ChildProcess` the supervisor uses. */
 export interface ControllerChild {
@@ -13,15 +29,20 @@ export interface ControllerChild {
   readonly stdin: Writable | null;
   readonly stdout: Readable | null;
   readonly stderr: Readable | null;
+  /** Whether its IPC channel is open: how it is asked to stop on Windows. */
+  readonly connected: boolean;
+  send(message: unknown): boolean;
   kill(signal?: NodeJS.Signals): boolean;
   once(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
   once(event: 'error', listener: (error: Error) => void): this;
+  on(event: 'message', listener: (message: unknown) => void): this;
+  off(event: 'message', listener: (message: unknown) => void): this;
 }
 
 export type SpawnController = (
   command: string,
   args: string[],
-  options: { env: NodeJS.ProcessEnv; stdio: ['pipe', 'pipe', 'pipe'] }
+  options: { env: NodeJS.ProcessEnv; stdio: ['pipe', 'pipe', 'pipe', 'ipc']; windowsHide: true }
 ) => ControllerChild;
 
 /** How to start the controller this time: read afresh before every start. */
@@ -52,8 +73,12 @@ export type SupervisorDeps = {
   spawn: SpawnController;
   launch: () => Promise<ControllerLaunch>;
   onPhase: (phase: EmbeddedControllerPhase) => void;
-  /** It exited in a way that must not be retried: the server revoked it, or another copy took over. */
-  onFinal: (exit: 'revoked' | 'taken_over') => void;
+  /**
+   * It exited in a way that must not be retried: the server revoked it,
+   * another copy took over, the server needs a newer controller, or it knows
+   * no controller by this credential.
+   */
+  onFinal: (exit: ControllerFinalExit) => void;
   /** One line the controller wrote, at the level it wrote it at. */
   onLine: (level: ControllerLogLevel, line: string) => void;
   now: () => number;
@@ -104,9 +129,11 @@ export class ControllerSupervisor {
   }
 
   /**
-   * Stops supervising and asks the process to end (SIGTERM). The agents keep
-   * running: the controller leaves its watchers up, and they reconnect when a
-   * controller comes back. Escalates to SIGKILL after `timeoutMs`.
+   * Stops supervising and asks the process to end: SIGTERM, or on Windows,
+   * where SIGTERM would end it on the spot, a stop message over its IPC
+   * channel. The agents keep running: the controller leaves its watchers up,
+   * and they reconnect when a controller comes back. Escalates to SIGKILL
+   * after `timeoutMs`.
    */
   async stop(timeoutMs: number): Promise<void> {
     this.stopping = true;
@@ -114,10 +141,46 @@ export class ControllerSupervisor {
     const child = this.child;
     const exited = this.exited;
     if (!child || !exited) return;
-    child.kill('SIGTERM');
+    if (process.platform === 'win32' && child.connected) child.send(STOP_MESSAGE);
+    else child.kill('SIGTERM');
     if (await within(exited, timeoutMs)) return;
     child.kill('SIGKILL');
     await within(exited, 2_000);
+  }
+
+  /**
+   * Asks the running controller to check every provider again now, and
+   * resolves once it has reported the result to Switch. Fails when no
+   * controller is running, it does not answer within `timeoutMs`, or it could
+   * not check or report.
+   */
+  recheckProviders(timeoutMs: number): Promise<void> {
+    const child = this.child;
+    if (!child || !child.connected)
+      return Promise.reject(new Error('The agent controller on this computer is not running.'));
+    const id = randomUUID();
+    return new Promise<void>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        child.off('message', onMessage);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error('The agent controller on this computer did not answer in time.'));
+      }, timeoutMs);
+      const onMessage = (message: unknown) => {
+        if (!isProviderRecheckReply(message) || message.id !== id) return;
+        done();
+        if (message.error === null) resolve();
+        else reject(new Error(message.error));
+      };
+      child.on('message', onMessage);
+      const request: ProviderRecheckRequest = { kind: PROVIDER_RECHECK_KIND, id };
+      if (!child.send(request)) {
+        done();
+        reject(new Error('Could not reach the agent controller on this computer.'));
+      }
+    });
   }
 
   /**
@@ -148,7 +211,8 @@ export class ControllerSupervisor {
     this.recent = [];
     const child = this.deps.spawn(launch.executable, launch.args, {
       env: launch.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+      windowsHide: true,
     });
     this.child = child;
     let resolveExited!: () => void;
@@ -193,16 +257,18 @@ export class ControllerSupervisor {
     if (failure) {
       this.deps.onPhase({
         kind: 'error',
-        message: `The agents controller could not be started: ${failure.message}`,
+        message: `The agent controller could not be started: ${failure.message}`,
       });
       return;
     }
     if (code === EXIT_REVOKED) return this.deps.onFinal('revoked');
+    if (code === EXIT_UPGRADE_REQUIRED) return this.deps.onFinal('upgrade_required');
+    if (code === EXIT_CREDENTIAL_INVALID) return this.deps.onFinal('credential_invalid');
     if (code === EXIT_TAKEN_OVER) return this.deps.onFinal('taken_over');
     if (code === EXIT_CONFIGURATION) {
       this.deps.onPhase({
         kind: 'error',
-        message: `The agents controller cannot run as it is set up: ${this.lastWords() ?? 'it gave no reason'}`,
+        message: `The agent controller cannot run as it is set up: ${this.lastWords() ?? 'it gave no reason'}`,
       });
       return;
     }

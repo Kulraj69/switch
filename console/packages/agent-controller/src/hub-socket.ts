@@ -57,7 +57,7 @@ export class HubSocket {
         new Promise<void>((resolve) => {
           if (ws.readyState === ws.CLOSED) return resolve();
           ws.once('close', () => resolve());
-          ws.close(HUB_CLOSE.restarting, 'the agents controller is restarting');
+          ws.close(HUB_CLOSE.restarting, 'the agent controller is restarting');
         })
     );
     await Promise.race([
@@ -116,7 +116,6 @@ export class HubSocket {
         filter: 'addressed',
         rooms: [],
         ...(message.startCursor === null ? {} : { startCursor: message.startCursor }),
-        worker: null,
         log,
         signal: lifetime.signal,
         onEvent: (event) => request((id) => ({ type: 'event', id, event })),

@@ -63,6 +63,7 @@ const assignment: Assignment = {
         advanced_config: {},
         instructions: '',
         auto_approve: false,
+        auto_mode: false,
         directory: null,
         isolation: 'shared',
       },
@@ -322,6 +323,37 @@ describe('the controller connection', () => {
   });
 });
 
+describe('the machine', () => {
+  it("changes the machine's name and description", async () => {
+    const { client: c } = client();
+    expect(await c.updateInfo({ name: 'build-box', description: 'The box' })).toEqual({
+      id: core.controllerId,
+      name: 'build-box',
+      description: 'The box',
+    });
+    expect(await c.updateInfo({ description: null })).toMatchObject({ description: null });
+    const sent = core.requests.filter((r) => r.method === 'PATCH');
+    expect(sent.map((r) => r.body)).toEqual([
+      { name: 'build-box', description: 'The box' },
+      { description: null },
+    ]);
+  });
+
+  it('says so when the server cannot rename from the controller', async () => {
+    core.scripted.push({
+      method: 'PATCH',
+      path: `/v1/management/controllers/${core.controllerId}`,
+      status: 405,
+      body: { detail: 'Method Not Allowed' },
+    });
+    const error = await client()
+      .client.updateInfo({ name: 'x' })
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ControllerApiError);
+    expect(error).toMatchObject({ status: 405, code: 'not_supported' });
+  });
+});
+
 describe('operations', () => {
   it('lists, claims, renews and reports', async () => {
     const { client: api } = client();
@@ -350,7 +382,12 @@ function statusReport() {
   return {
     seq: 1,
     observed_at: new Date().toISOString(),
-    controller: { version: '0.1.0', protocol: 2 as const, assignment_revision: 0 },
+    controller: {
+      version: '0.1.0',
+      protocol: 2 as const,
+      assignment_revision: 0,
+      updated_by: 'self' as const,
+    },
     machine: {
       platform: { os: 'linux', arch: 'x64', os_version: '6.1' },
       disk_free_bytes: 1,

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from switch_core.bridges.agent.protocol.agent_connections import AgentConnectionRegistry
+from switch_core.config import ControllerRelease
 from switch_core.db.models import AgentControllerEnrollmentCode
 from switch_core.db.stores.api_key_store import ApiKeyStore
 from switch_core.management.bindings import load_bindings
@@ -29,9 +30,12 @@ from tests.switch_core.management.harness import (
     create_managed_agent,
     definition,
     enroll_console,
+    enroll_daemon,
+    ensure_connected,
     fixture,
     provider,
     report_status,
+    status_report,
 )
 
 
@@ -361,7 +365,7 @@ class TestAssignment:
 
 
 class TestStatus:
-    async def test_a_report_makes_the_controller_online_until_it_goes_stale(
+    async def test_a_connected_controller_is_online_however_old_its_report(
         self, harness: Harness
     ) -> None:
         owner = await add_member(harness.session_factory, "ada")
@@ -376,10 +380,15 @@ class TestStatus:
                 "/gateway/management/controllers", cookies=cookies_for(owner)
             )
         assert response.status_code == 200, response.text
-        assert response.json() == {"assignment_revision": 0, "report_within_s": 60}
+        assert response.json() == {
+            "assignment_revision": 0,
+            "report_within_s": 60,
+            "controller_release": None,
+        }
+        assert online.json()[0]["release"] is None
         assert online.json()[0]["state"] == "online"
         assert online.json()[0]["status"]["seq"] == 5
-        assert stale.json()[0]["state"] == "unknown"
+        assert stale.json()[0]["state"] == "online"
 
     async def test_an_older_seq_is_ignored_but_answered(self, harness: Harness) -> None:
         owner = await add_member(harness.session_factory, "ada")
@@ -452,6 +461,132 @@ class TestStatus:
         assert response.headers["Switch-Controller-Protocol-Accepts"] == "2-2"
         assert accepted.status_code == 200
         assert accepted.headers["Switch-Controller-Protocol-Accepts"] == "2-2"
+
+
+_RELEASE = ControllerRelease(
+    version="0.31.0",
+    url="https://example.com/switch-agent-controller-0.31.0.tgz",
+    sha256="b" * 64,
+)
+
+
+class TestControllerRelease:
+    @pytest.fixture
+    def harness(self, session_factory: async_sessionmaker[AsyncSession]) -> Harness:
+        return build_harness(session_factory, controller_release=_RELEASE)
+
+    async def test_the_status_answer_names_the_release_and_the_owner_sees_it(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        report = status_report(1)
+        report["update"] = {"target": "0.31.0", "state": "waiting_idle"}
+        async with harness.client() as client:
+            controller = await enroll_daemon(harness, client, owner)
+            await ensure_connected(client, controller)
+            response = await client.put(
+                f"/v1/management/controllers/{controller.controller_id}/status",
+                json=report,
+                headers=controller.headers,
+            )
+            listed = await client.get(
+                "/gateway/management/controllers", cookies=cookies_for(owner)
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["controller_release"] == {
+            "version": "0.31.0",
+            "url": "https://example.com/switch-agent-controller-0.31.0.tgz",
+            "sha256": "b" * 64,
+        }
+        view = listed.json()[0]
+        assert view["release"] == {
+            "wanted": "0.31.0",
+            "running": "0.1.0",
+            "current": False,
+        }
+        assert view["status"]["update"] == {"target": "0.31.0", "state": "waiting_idle"}
+
+    async def test_a_controller_on_the_release_is_current(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        report = status_report(1)
+        report["controller"]["version"] = "0.31.0"
+        async with harness.client() as client:
+            controller = await enroll_daemon(harness, client, owner)
+            await ensure_connected(client, controller)
+            await client.put(
+                f"/v1/management/controllers/{controller.controller_id}/status",
+                json=report,
+                headers=controller.headers,
+            )
+            listed = await client.get(
+                "/gateway/management/controllers", cookies=cookies_for(owner)
+            )
+        view = listed.json()[0]
+        assert view["version"] == "0.31.0"
+        assert view["release"] == {
+            "wanted": "0.31.0",
+            "running": "0.31.0",
+            "current": True,
+        }
+        assert "update" not in view["status"]
+
+    async def test_a_console_controller_is_told_no_release(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        async with harness.client() as client:
+            controller = await enroll_console(harness, client, owner)
+            response = await report_status(client, controller, 1)
+            listed = await client.get(
+                "/gateway/management/controllers", cookies=cookies_for(owner)
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["controller_release"] is None
+        assert listed.json()[0]["release"] is None
+
+    async def test_a_controller_console_updates_is_told_no_release(
+        self, harness: Harness
+    ) -> None:
+        """One Switch Console runs on an SSH host enrolls as a daemon, but
+        follows Console's bundle, not the release Core names."""
+        owner = await add_member(harness.session_factory, "ada")
+        report = status_report(1)
+        report["controller"]["updated_by"] = "console"
+        async with harness.client() as client:
+            controller = await enroll_daemon(harness, client, owner)
+            await ensure_connected(client, controller)
+            response = await client.put(
+                f"/v1/management/controllers/{controller.controller_id}/status",
+                json=report,
+                headers=controller.headers,
+            )
+            listed = await client.get(
+                "/gateway/management/controllers", cookies=cookies_for(owner)
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["controller_release"] is None
+        view = listed.json()[0]
+        assert view["release"] is None
+        assert view["status"]["controller"]["updated_by"] == "console"
+
+    async def test_a_controller_that_updates_itself_is_told_the_release(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        report = status_report(1)
+        report["controller"]["updated_by"] = "self"
+        async with harness.client() as client:
+            controller = await enroll_daemon(harness, client, owner)
+            await ensure_connected(client, controller)
+            response = await client.put(
+                f"/v1/management/controllers/{controller.controller_id}/status",
+                json=report,
+                headers=controller.headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["controller_release"]["version"] == "0.31.0"
 
 
 async def _placed_agent(
@@ -790,6 +925,75 @@ class TestPlacementBindsTheAgentInCore:
         assert restarted.is_revoked(controller.controller_id)
 
 
+class TestTheControllersOwnInfo:
+    async def test_the_controller_renames_and_describes_itself(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        async with harness.client() as client:
+            controller = await enroll_console(harness, client, owner, name="laptop")
+            await report_status(client, controller, 1, providers=[provider("claude")])
+            created = await create_managed_agent(
+                client, owner, name="reviewer", controller_id=controller.controller_id
+            )
+            path = f"/v1/management/controllers/{controller.controller_id}"
+            renamed = await client.patch(
+                path,
+                json={"name": " build box ", "description": " Under the desk "},
+                headers=controller.headers,
+            )
+            cleared = await client.patch(
+                path, json={"description": "  "}, headers=controller.headers
+            )
+            listed = await client.get(
+                "/gateway/management/controllers", cookies=cookies_for(owner)
+            )
+        assert renamed.status_code == 200, renamed.text
+        assert (renamed.json()["name"], renamed.json()["description"]) == (
+            "build box",
+            "Under the desk",
+        )
+        assert renamed.json()["state"] == "online"
+        assert cleared.json()["name"] == "build box"
+        assert cleared.json()["description"] is None
+        [stored] = listed.json()
+        assert (stored["name"], stored["description"]) == ("build box", None)
+        binding = harness.protocol.connections.controllers.binding(
+            created.json()["agent_id"]
+        )
+        assert binding is not None and binding.controller_name == "build box"
+
+    async def test_the_owners_limits_hold_and_only_its_own_machine(
+        self, harness: Harness
+    ) -> None:
+        owner = await add_member(harness.session_factory, "ada")
+        async with harness.client() as client:
+            mine = await enroll_console(harness, client, owner, name="mine")
+            theirs = await enroll_console(harness, client, owner, name="theirs")
+            path = f"/v1/management/controllers/{mine.controller_id}"
+            refused = [
+                await client.patch(path, json=body, headers=mine.headers)
+                for body in (
+                    {},
+                    {"name": "   "},
+                    {"name": None},
+                    {"name": "x" * 201},
+                    {"description": "x" * 501},
+                )
+            ]
+            other = await client.patch(
+                f"/v1/management/controllers/{theirs.controller_id}",
+                json={"name": "taken"},
+                headers=mine.headers,
+            )
+            anonymous = await client.patch(path, json={"name": "nobody"})
+        assert [(r.status_code, r.json()["error"]["code"]) for r in refused] == [
+            (422, "validation_error")
+        ] * 5
+        assert (other.status_code, other.json()["error"]["code"]) == (403, "forbidden")
+        assert anonymous.status_code == 401
+
+
 def test_bearer_helper() -> None:
     assert bearer("x") == {"Authorization": "Bearer x"}
 
@@ -799,6 +1003,7 @@ def test_definition_helper_is_the_v1_shape() -> None:
         "provider",
         "model",
         "instructions",
+        "auto_mode",
         "auto_approve",
         "directory",
         "isolation",

@@ -1,4 +1,5 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import { hostname, release } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -23,6 +24,7 @@ import {
 import { DEFAULT_BACKOFF } from './controller-supervisor';
 import { EmbeddedControllerService } from './embedded-controller-service';
 import { gatewayManagementPort } from './management-port';
+import { ProviderPrecheck } from './provider-precheck';
 
 const execute = promisify(execFile);
 
@@ -42,7 +44,7 @@ async function controllerVersion(bundle: string): Promise<string> {
     timeout: 15_000,
   });
   const version = stdout.trim();
-  if (!version) throw new Error(`The agents controller at ${bundle} did not report a version.`);
+  if (!version) throw new Error(`The agent controller at ${bundle} did not report a version.`);
   return version;
 }
 
@@ -69,6 +71,34 @@ function computerName(): string {
   return hostname();
 }
 
+/** Started as onboarding opens; see {@link ProviderPrecheck}. */
+export const providerPrecheck = new ProviderPrecheck({
+  execPath: process.execPath,
+  bundles: {
+    controller: resolveAgentControllerBundlePath,
+    sharedHost: resolveSharedHostBundlePath,
+  },
+  env: () => process.env,
+  seedFile: () => join(base(), 'provider-precheck.json'),
+  probeDir: () => join(base(), 'provider-precheck'),
+  execute: async (executable, args, env) => {
+    // Every provider's check allows itself well under this; it is a backstop.
+    await execute(executable, args, { env, timeout: 120_000, windowsHide: true });
+  },
+  log: {
+    warn: (message, fields) => log.warn(message, { event: 'embedded_controller', ...fields }),
+  },
+  read: async (file) => {
+    try {
+      return await readFile(file, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  },
+  now: Date.now,
+});
+
 export const embeddedControllerService = new EmbeddedControllerService({
   platform: process.platform,
   machine: () => ({
@@ -86,7 +116,7 @@ export const embeddedControllerService = new EmbeddedControllerService({
     },
   }),
   records: new EnrollmentFile(() => join(base(), 'state.json')),
-  serverApiUrl: async (serverId) => (await getServer(serverId))?.apiUrl ?? null,
+  serverApiUrl: async (serverId) => (await getServer(serverId))?.url ?? null,
   secrets: encryptedAppSecretsStore,
   management: gatewayManagementPort,
   files: {
@@ -122,4 +152,5 @@ export const embeddedControllerService = new EmbeddedControllerService({
     }
     return names;
   },
+  providerSeed: () => providerPrecheck.seedFile(),
 });

@@ -78,12 +78,13 @@ PLACEHOLDER_RE = re.compile(r"\{(\$?[A-Za-z_][A-Za-z0-9_]*)\}")
 # bridge's display name, a room's name, a platform username.
 ENTITY_PARAM_TYPES = ("agent", "bridge", "room", "user")
 
-# Param types the Console answers and removes before provisioning: the coding
-# agent that runs an agent the template creates, the machine it runs on, and
-# its working directory. The server sees them only in stored documents. They
-# are known types so such a document passes the lint and can be stored; if
-# one does reach provisioning it is treated as a string.
-CONSOLE_PARAM_TYPES = ("provider", "location", "directory")
+# Param types that say how an agent the template creates runs: the coding
+# agent that runs it, where it runs (`location`, a Console answer: this
+# computer or an SSH host; `machine`, one of the owner's machines on the
+# server), and its working directory. They are read when the agents are
+# created and removed before the rooms are provisioned; if one does reach
+# provisioning it is treated as a string.
+CONSOLE_PARAM_TYPES = ("provider", "location", "machine", "directory")
 
 # Param types whose ``default`` may be a list of candidates, tried in order
 # until one names something the server (or, for the Console's types, the
@@ -92,7 +93,7 @@ CONSOLE_PARAM_TYPES = ("provider", "location", "directory")
 # the first coding agent available where the agent runs. A `user` param has no "first":
 # which account is meant depends on who asks, and ``{$creator}`` already
 # covers the deployer.
-CHAIN_PARAM_TYPES = ("agent", "bridge", "room", "provider", "location")
+CHAIN_PARAM_TYPES = ("agent", "bridge", "room", "provider", "location", "machine")
 FIRST = "$first"
 # In a `room` param's chain: the room the template's own ``room:`` block
 # describes. Resolved by the Console, which decides between creating that
@@ -116,6 +117,7 @@ ParamType = Literal[
     "user",
     "provider",
     "location",
+    "machine",
     "directory",
 ]
 
@@ -406,6 +408,28 @@ ExternalReferenceEntry = (
 )
 
 
+# A package in a room spec is always one that exists: a template attaches
+# packages but never defines or changes one, so there is no inline shape.
+
+
+class ExistingPackageById(BaseModel):
+    """Attach an existing package by id (exact, unambiguous)."""
+
+    model_config = {"extra": "forbid"}
+    id: str
+
+
+class ExistingPackageByName(BaseModel):
+    """Attach an existing package by name (resolved over the caller's owned +
+    public packages; ambiguity is an error)."""
+
+    model_config = {"extra": "forbid"}
+    name: str
+
+
+PackageEntry = ExistingPackageById | ExistingPackageByName
+
+
 class DocSpec(BaseModel):
     name: str
     description: str
@@ -426,6 +450,7 @@ class RoomSpec(BaseModel):
     users: list[str] = []
     roles: list[RoleSpec] = []
     references: list[ExternalReferenceEntry] = []
+    packages: list[PackageEntry] = []
     docs: list[DocSpec] = []
     # Agent name to the alias it can be addressed by in this room.
     aliases: dict[str, str] | None = None
@@ -501,6 +526,7 @@ class ProvisionResult(BaseModel):
     room_id: str
     room_name: str
     attached_reference_ids: list[str] = []
+    attached_package_ids: list[str] = []
     created_reference_ids: list[str] = []
     created_document_ids: list[str] = []
     role_names: list[str] = []
@@ -820,8 +846,13 @@ class RoomYamlService:
         """
         try:
             data = yaml.safe_load(text)
+            # A version 2 param's `if:` is the template engine's, not the spec's.
             declared = {
-                name: ParamSpec.model_validate(spec)
+                name: ParamSpec.model_validate(
+                    {k: v for k, v in spec.items() if k != "if"}
+                    if isinstance(spec, dict)
+                    else spec
+                )
                 for name, spec in ((data or {}).get("params") or {}).items()
             }
         except (yaml.YAMLError, ValidationError, AttributeError, TypeError):
@@ -1000,6 +1031,9 @@ class RoomYamlService:
         attached_ref_ids, inline_refs = await self._resolve_references(
             spec.references, user_id=user_id, is_admin=is_admin
         )
+        attached_package_ids = await self._resolve_packages(
+            spec.packages, user_id=user_id, is_admin=is_admin
+        )
 
         config = RoomCreateConfig(
             name=spec.name,
@@ -1024,6 +1058,7 @@ class RoomYamlService:
             write_visibility=spec.write_visibility,
             roles=spec.roles or None,
             reference_ids=attached_ref_ids or None,
+            package_ids=attached_package_ids or None,
             aliases=spec.aliases,
         )
         result = await self._rooms.create_room(config)
@@ -1057,6 +1092,7 @@ class RoomYamlService:
             room_id=room_id,
             room_name=result.room.name,
             attached_reference_ids=attached_ref_ids,
+            attached_package_ids=attached_package_ids,
             created_reference_ids=created_ref_ids,
             created_document_ids=created_doc_ids,
             role_names=[r.name for r in spec.roles],
@@ -1149,6 +1185,24 @@ class RoomYamlService:
             errors=errors,
         )
 
+    async def check_bridges(self, parsed: ParsedTemplate) -> None:
+        """Every messaging app the rooms name must exist, checked before
+        anything is created: a run that creates agents first would otherwise
+        find out only once they exist."""
+        specs = (
+            list(parsed.spec.rooms)
+            if isinstance(parsed.spec, GroupSpec)
+            else [parsed.spec]
+        )
+        for spec in specs:
+            bridge_id = await self._resolve_bridge_id(spec.bridge)
+            if spec.users and bridge_id is None:
+                raise ValueError(
+                    f"Room {spec.name!r} names users ({', '.join(spec.users)}), and "
+                    "it is on no messaging app: this server has none set up. Leave "
+                    "users out, or make them depend on a bridge."
+                )
+
     async def _resolve_bridge_id(self, bridge_name: str | None) -> str | None:
         if bridge_name is None:
             async with self._session_factory() as session:
@@ -1206,6 +1260,44 @@ class RoomYamlService:
                     )
                     inline.append(entry)
         return attached_ids, inline
+
+    async def _resolve_packages(
+        self, entries: list[PackageEntry], *, user_id: str, is_admin: bool
+    ) -> list[str]:
+        """Resolve the packages to attach up front, failing loud on a missing,
+        ambiguous or unreadable one, so the room is not created without it.
+        Attaching needs read access, as it does by hand."""
+        attached_ids: list[str] = []
+        async with self._session_factory() as session:
+            visible = await self._resources.list_packages_for_user(session, user_id)
+            by_name: dict[str, list[str]] = {}
+            for pkg in visible:
+                by_name.setdefault(pkg.name, []).append(pkg.id)
+            for entry in entries:
+                if isinstance(entry, ExistingPackageById):
+                    try:
+                        await self._resources.get_package_for_user(
+                            session, entry.id, user_id, is_admin=is_admin
+                        )
+                    except PermissionError as e:
+                        raise PermissionError(
+                            f"Cannot attach package {entry.id!r}: {e}"
+                        ) from e
+                    attached_ids.append(entry.id)
+                else:
+                    matches = by_name.get(entry.name, [])
+                    if not matches:
+                        raise ValueError(
+                            f"No package named {entry.name!r} is accessible"
+                        )
+                    if len(matches) > 1:
+                        raise ValueError(
+                            f"Ambiguous package name {entry.name!r}: "
+                            f"{len(matches)} matches; attach by 'id' instead"
+                        )
+                    attached_ids.append(matches[0])
+        # A package named twice (by id and by name, say) is attached once.
+        return list(dict.fromkeys(attached_ids))
 
     async def _create_inline_references(
         self,
@@ -1390,14 +1482,17 @@ class RoomYamlService:
         agents: bool = True,
         users: bool = True,
         references: bool = True,
+        packages: bool = True,
         docs: bool = True,
         roles: bool = True,
     ) -> str:
         """Read a live room back into the import surface and dump it to YAML.
 
-        References export as attach-by-``id``. Only room-scoped documents are
-        exported (as inline docs) — they are the only docs the import surface
-        can recreate. Each section can be dropped via its toggle.
+        References and packages export as attach-by-``id``. Only room-scoped
+        documents are exported (as inline docs): they are the only docs the
+        import surface can recreate. A package's own references and documents
+        are not exported, since attaching the package brings them. Each
+        section can be dropped via its toggle.
         """
         async with self._session_factory() as session:
             room = await self._room_store.get(session, room_id)
@@ -1473,6 +1568,11 @@ class RoomYamlService:
                 refs = await self._resources.list_room_references(session, room.id)
                 if refs:
                     data["references"] = [{"id": r.id} for r in refs]
+
+            if packages:
+                pkgs = await self._resources.list_room_packages(session, room.id)
+                if pkgs:
+                    data["packages"] = [{"id": p.id} for p in pkgs]
 
             if docs:
                 room_docs = await self._resources.list_room_documents(session, room.id)

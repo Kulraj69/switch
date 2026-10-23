@@ -1,22 +1,55 @@
 // Agent management: the machines (agent controllers) that run managed agents,
 // the agents placed on them, and the operations sent to them. Served under
-// /gateway/management only when the server runs with AGENT_MANAGEMENT_ENABLED;
-// every failure comes back as {"error": {"code", "message", "retryable"}}.
+// /gateway/management only when the server turns on its agent_management flag,
+// except the provider list and advanced-configuration fields, which are always
+// served; every failure comes back as {"error": {"code", "message", "retryable"}}.
 
 const BASE = "/gateway/management";
 
-export type Provider = "claude" | "codex" | "opencode" | "antigravity" | "cursor";
-export const PROVIDERS: { value: Provider; label: string }[] = [
-  { value: "claude", label: "Claude Code" },
-  { value: "codex", label: "Codex" },
-  { value: "opencode", label: "OpenCode" },
-  { value: "antigravity", label: "Antigravity" },
-  { value: "cursor", label: "Cursor CLI" },
-];
+/** A provider's id, one of those `fetchProviders` lists. */
+export type Provider = string;
+
+/** One field of a provider's advanced configuration, as the server describes it. */
+export interface AdvancedField {
+  key: string;
+  label: string;
+  type: "text" | "textarea" | "number" | "boolean" | "list" | "select";
+  help: string | null;
+  placeholder: string | null;
+  /** A select's choices, the first (value "") meaning unset; null for other types. */
+  options: { value: string; label: string }[] | null;
+  catalogue: { kind: "model" | "model-variant"; model_field?: string } | null;
+}
+
+/** A provider a definition can name. */
+export interface ProviderInfo {
+  id: Provider;
+  label: string;
+  advanced_fields: AdvancedField[];
+}
 
 export type DesiredState = "running" | "stopped";
 export type Isolation = "shared" | "isolated";
-export type ControllerState = "online" | "unknown" | "revoked";
+/**
+ * `online`: its controller's socket to Switch is attached. `offline`: it was
+ * connected and is not now (stopped, asleep, cut off, or the Switch server
+ * holding it went away). `unknown`: it has never connected. `revoked`: removed
+ * from Switch.
+ */
+export type ControllerState = "online" | "offline" | "unknown" | "revoked";
+
+/** The machine's connection as Switch last recorded it: the current one, or the last. */
+export interface ControllerConnection {
+  /** When its socket last attached. */
+  connected_at: string;
+  /** Null while it is connected, and when the Switch server holding it was lost long ago. */
+  disconnected_at: string | null;
+  /**
+   * Null while it is connected; else `socket_closed`, `heartbeat_lapsed`, `taken_over`,
+   * `revoked`, `server_shutdown` or `server_lost`.
+   */
+  disconnect_reason: string | null;
+}
 
 export interface Platform {
   os: string;
@@ -50,7 +83,13 @@ export interface AgentStatus {
 export interface StatusReport {
   seq: number;
   observed_at: string;
-  controller: { version: string; protocol: number; assignment_revision: number };
+  controller: {
+    version: string;
+    protocol: number;
+    assignment_revision: number;
+    /** Who moves it onto another release; absent from older controllers. */
+    updated_by?: "self" | "console";
+  };
   machine: {
     platform: Platform;
     disk_free_bytes: number;
@@ -63,6 +102,23 @@ export interface StatusReport {
   providers: ProviderStatus[];
   tools: { tool: string; state: string; reason?: string | null }[];
   agents: AgentStatus[];
+  /** Why the controller does not run the release Switch names yet; absent when it does, and from older controllers. */
+  update?: ControllerUpdate | null;
+}
+
+export interface ControllerUpdate {
+  /** The version it is moving to. */
+  target: string;
+  state: "waiting_idle" | "failed" | "restart_needed";
+  problem?: string | null;
+}
+
+/** The controller release Switch tells a machine to run, and whether it runs it. */
+export interface ControllerReleaseState {
+  wanted: string;
+  /** The version it last reported; null before it has reported one. */
+  running: string | null;
+  current: boolean;
 }
 
 export interface Controller {
@@ -74,8 +130,13 @@ export interface Controller {
   platform: Platform | null;
   version: string | null;
   state: ControllerState;
+  /** When it last reported its status. */
   last_seen_at: string | null;
+  /** Null when it has never connected. */
+  connection: ControllerConnection | null;
   status: StatusReport | null;
+  /** Null when Switch names no release for it, as for a Switch Console machine, which updates with Console. */
+  release: ControllerReleaseState | null;
   assignment_revision: number;
   created_at: string;
   revoked_at: string | null;
@@ -85,6 +146,9 @@ export interface Definition {
   provider: Provider;
   model: string | null;
   instructions: string;
+  /** The provider's own automatic review: safe actions run, risky ones still ask. */
+  auto_mode: boolean;
+  /** Bypass: every permission check skipped. Wins over `auto_mode`. */
   auto_approve: boolean;
   directory: string | null;
   isolation: Isolation;
@@ -214,6 +278,16 @@ export async function revokeController(controllerId: string): Promise<void> {
   });
 }
 
+/** Every provider the server runs, in the order to offer them. */
+export async function fetchProviders(): Promise<ProviderInfo[]> {
+  return (await request<{ providers: ProviderInfo[] }>("/providers")).providers;
+}
+
+/** The provider's label, or its id when the server does not list it. */
+export function providerLabel(providers: ProviderInfo[], provider: Provider): string {
+  return providers.find((p) => p.id === provider)?.label ?? provider;
+}
+
 export function fetchManagedAgents(): Promise<ManagedAgent[]> {
   return request<ManagedAgent[]>("/agents");
 }
@@ -258,7 +332,45 @@ export function createOperation(body: {
   return request<Operation>("/operations", { method: "POST", body: JSON.stringify(body) });
 }
 
-/** The command a user runs on the machine to enroll it with a fresh code. */
-export function enrollCommand(server: string, code: string): string {
-  return `switch-agent-controller enroll --server ${server} --code ${code}`;
+/** One word for a POSIX shell: as it is when nothing in it is special, else single-quoted. */
+export function shellQuote(value: string): string {
+  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** The enroll options for a machine's name and description, when given (blank is left out: the name then defaults to the host name). */
+function machineWords(machine: { name: string; description: string }): string[] {
+  const words: string[] = [];
+  const name = machine.name.trim();
+  const description = machine.description.trim();
+  if (name) words.push("--name", name);
+  if (description) words.push("--description", description);
+  return words;
+}
+
+/**
+ * The controller's installer, as published on the default branch: it finds the
+ * newest `switch-agent-controller` release and installs it with npm.
+ */
+export const CONTROLLER_INSTALL_SCRIPT_URL =
+  "https://raw.githubusercontent.com/sandbox-quantum/switch/main/console/packages/agent-controller/install.sh";
+
+/** The one command that installs the controller, enrolls the machine with a fresh code and starts it as a service. */
+export function installCommand(
+  server: string,
+  code: string,
+  machine: { name: string; description: string },
+): string {
+  const options = ["--server", server, "--code", code, ...machineWords(machine)];
+  return `curl -fsSL ${CONTROLLER_INSTALL_SCRIPT_URL} | sh -s -- ${options.map(shellQuote).join(" ")}`;
+}
+
+/** The command a user runs on a machine where the controller is installed already, to enroll it with a fresh code. */
+export function enrollCommand(
+  server: string,
+  code: string,
+  machine: { name: string; description: string },
+): string {
+  const words = ["switch-agent-controller", "enroll", "--server", server, "--code", code, ...machineWords(machine)];
+  return words.map(shellQuote).join(" ");
 }

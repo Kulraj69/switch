@@ -21,13 +21,13 @@ from switch_core.db.stores.api_key_store import ApiKeyStore
 from switch_core.db.stores.collaboration_bridge_store import CollaborationBridgeStore
 from switch_core.db.stores.external_user_store import ExternalUserStore
 from switch_core.db.stores.room_store import RoomStore
-from switch_core.db.stores.task_store import TaskStore
 from switch_core.room_service import RoomService
 from switch_core.telemetry import TelemetryService
 from switch_core.telemetry.session_start import (
     SessionStartLimiter,
     default_session_start_limiter,
 )
+from switch_core.trust.client import TrustClient
 
 if TYPE_CHECKING:
     from switch_core.session_activity.outcomes import ApprovalOutcomes
@@ -45,7 +45,6 @@ def init_dependencies(
     collab_lifecycle: CollaborationBridgeLifecycleService,
     event_buffer: EventBuffer,
     connections: AgentConnectionRegistry,
-    task_store: TaskStore,
     resource_service: ResourceService,
     api_key_store: ApiKeyStore,
     api_key_cache: ApiKeyCache,
@@ -54,6 +53,7 @@ def init_dependencies(
     session_factory: Any,
     config: Any,
     approval_outcomes: ApprovalOutcomes,
+    trust_client: TrustClient,
     telemetry: TelemetryService | None = None,
 ) -> None:
     _state["agent_store"] = agent_store
@@ -64,7 +64,6 @@ def init_dependencies(
     _state["collab_lifecycle"] = collab_lifecycle
     _state["event_buffer"] = event_buffer
     _state["connections"] = connections
-    _state["task_store"] = task_store
     _state["resource_service"] = resource_service
     _state["api_key_store"] = api_key_store
     _state["api_key_cache"] = api_key_cache
@@ -73,6 +72,7 @@ def init_dependencies(
     _state["session_factory"] = session_factory
     _state["config"] = config
     _state["telemetry"] = telemetry
+    _state["trust_client"] = trust_client
     _state["session_start_limiter"] = default_session_start_limiter()
 
     _state["protocol"] = AgentCore(
@@ -84,7 +84,6 @@ def init_dependencies(
         collab_lifecycle=collab_lifecycle,
         event_buffer=event_buffer,
         connections=connections,
-        task_store=task_store,
         resource_service=resource_service,
         api_key_store=api_key_store,
         api_key_cache=api_key_cache,
@@ -93,6 +92,7 @@ def init_dependencies(
         session_factory=session_factory,
         config=config,
         approval_outcomes=approval_outcomes,
+        trust_client=trust_client,
         telemetry=telemetry,
     )
 
@@ -120,10 +120,6 @@ def get_client_lifecycle() -> ClientLifecycleService:
 
 def get_event_buffer() -> EventBuffer:
     return _state["event_buffer"]  # type: ignore[no-any-return]
-
-
-def get_task_store() -> TaskStore:
-    return _state["task_store"]  # type: ignore[no-any-return]
 
 
 def get_resource_service() -> ResourceService:

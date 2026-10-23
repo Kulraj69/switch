@@ -1,14 +1,20 @@
+import { PROVIDER_RUNTIMES } from '../providers/registry';
+
 export const AGENT_ENV_VARS = [
   'ALL_PROXY',
   'ANTHROPIC_API_KEY',
   'ANTHROPIC_AUTH_TOKEN',
   'ANTHROPIC_BASE_URL',
+  'ANTHROPIC_BEDROCK_BASE_URL',
   'ANTHROPIC_DEFAULT_HAIKU_MODEL',
   'ANTHROPIC_DEFAULT_OPUS_MODEL',
   'ANTHROPIC_DEFAULT_SONNET_MODEL',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_SMALL_FAST_MODEL',
+  'ANTHROPIC_VERTEX_BASE_URL',
+  'ANTHROPIC_VERTEX_PROJECT_ID',
   'AWS_ACCESS_KEY_ID',
+  'AWS_BEARER_TOKEN_BEDROCK',
   'AWS_DEFAULT_REGION',
   'AWS_PROFILE',
   'AWS_REGION',
@@ -20,10 +26,15 @@ export const AGENT_ENV_VARS = [
   'BAILIAN_CODING_PLAN_API_KEY',
   'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS',
   'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS',
+  'CLAUDE_CODE_OAUTH_TOKEN',
+  'CLAUDE_CODE_SKIP_BEDROCK_AUTH',
+  'CLAUDE_CODE_SKIP_VERTEX_AUTH',
   'CLAUDE_CODE_SUBAGENT_MODEL',
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
   'CLAUDE_CONFIG_DIR',
+  'CLOUDSDK_CONFIG',
+  'CLOUD_ML_REGION',
   'CODEX_HOME',
   'CURSOR_API_KEY',
   'DASHSCOPE_API_KEY',
@@ -36,8 +47,8 @@ export const AGENT_ENV_VARS = [
   'GOOGLE_GEMINI_BASE_URL',
   'GOOGLE_GENAI_API_VERSION',
   'GOOGLE_VERTEX_BASE_URL',
-  'HTTP_PROXY',
   'HTTPS_PROXY',
+  'HTTP_PROXY',
   'KIMI_API_KEY',
   'MISTRAL_API_KEY',
   'MOONSHOT_API_KEY',
@@ -54,12 +65,43 @@ export const AGENT_ENV_VARS = [
 ] as const;
 
 /**
+ * What Windows itself, Node and the provider CLIs need there to find the
+ * user's profile, the system and a temporary directory. None is set on macOS
+ * or Linux.
+ */
+const WINDOWS_ENV = [
+  'APPDATA',
+  'COMSPEC',
+  'COMMONPROGRAMFILES',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'LOCALAPPDATA',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+  'PATHEXT',
+  'PROCESSOR_ARCHITECTURE',
+  'PROGRAMDATA',
+  'PROGRAMFILES',
+  'PROGRAMFILES(X86)',
+  'SYSTEMDRIVE',
+  'SYSTEMROOT',
+  'TEMP',
+  'TMP',
+  'USERDOMAIN',
+  'USERNAME',
+  'USERPROFILE',
+  'WINDIR',
+];
+
+/**
  * What a session host's `execution.inheritEnv` names: the provider variables
- * above plus the basics a CLI needs to find itself, its home and its terminal.
- * Console and the headless agents controller both launch hosts with it.
+ * above, those each registered provider's runtime asks for, and the basics a
+ * CLI needs to find itself, its home and its terminal. Matched without regard
+ * to case on Windows, where `Path` and `PATH` are one variable.
+ * Console and the headless agent controller both launch hosts with it.
  */
 export const EXECUTION_INHERIT_ENV: readonly string[] = [
-  ...AGENT_ENV_VARS,
+  ...new Set([...AGENT_ENV_VARS, ...PROVIDER_RUNTIMES.flatMap((runtime) => runtime.inheritEnv)]),
   'PATH',
   'HOME',
   'USER',
@@ -68,4 +110,5 @@ export const EXECUTION_INHERIT_ENV: readonly string[] = [
   'LANG',
   'TERM',
   'SSH_AUTH_SOCK',
+  ...WINDOWS_ENV,
 ];

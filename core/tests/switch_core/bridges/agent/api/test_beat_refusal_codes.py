@@ -5,8 +5,8 @@ only act on the status: every refusal meant reopen. One of the three must never
 be answered that way. Being superseded means another client holds the
 connection, and reopening is itself a takeover — so the client that was fenced
 out reopens, takes it straight back off the winner, and the pair trade it for
-as long as both run. The fence stops the loser's cursor from moving the
-winner's; it did not stop the loser from coming back.
+as long as both run. The fence stops the loser's beats from counting for the
+winner; it did not stop the loser from coming back.
 """
 
 from __future__ import annotations
@@ -24,14 +24,15 @@ from switch_core.bridges.agent.protocol.agent_connections import (
     SupersededConnectionError,
 )
 from switch_core.bridges.agent.protocol.event_buffer import EventBuffer
+from switch_core.bridges.agent.protocol.positions import OWN_EVENTS
 
 AGENT_ID = "agent-1"
 CONN_ID = "conn-1"
 
 
 class _Protocol:
-    def __init__(self) -> None:
-        self.event_buffer = EventBuffer(sequence_base=0)
+    def __init__(self, event_buffer: EventBuffer) -> None:
+        self.event_buffer = event_buffer
         self.connections = AgentConnectionRegistry()
 
 
@@ -42,23 +43,25 @@ def _open(protocol: _Protocol, *, speaks: int | None = PROTOCOL_VERSION) -> Any:
         scope="single",
         delivery_filter="all",
         spawn_capable=False,
-        cursor=0,
+        position={OWN_EVENTS: 0},
         declaration=ClientDeclaration(speaks=speaks),
         expected_generation=None,
     )
 
 
-def _beat(protocol: _Protocol, generation: int | None) -> Any:
-    return _record_beat(protocol, AGENT_ID, CONN_ID, 0, generation)  # type: ignore[arg-type]
+async def _beat(protocol: _Protocol, generation: int | None) -> Any:
+    return _record_beat(protocol, AGENT_ID, CONN_ID, generation)  # type: ignore[arg-type]
 
 
-def test_a_superseded_tick_is_refused_as_a_takeover() -> None:
-    protocol = _Protocol()
+async def test_a_superseded_tick_is_refused_as_a_takeover(
+    db_buffer: EventBuffer,
+) -> None:
+    protocol = _Protocol(db_buffer)
     displaced = _open(protocol).stream_generation
     _open(protocol)  # the winner attaches; the incarnation bumps
 
     with pytest.raises(SupersededConnectionError) as caught:
-        _beat(protocol, displaced)
+        await _beat(protocol, displaced)
 
     # The same code the displaced stream is evicted with: one ending reaching
     # the client by whichever door is still open to it.
@@ -68,13 +71,15 @@ def test_a_superseded_tick_is_refused_as_a_takeover() -> None:
     assert str(displaced + 1) in str(caught.value)
 
 
-def test_a_tick_with_no_stream_is_refused_as_something_to_reopen() -> None:
-    protocol = _Protocol()
+async def test_a_tick_with_no_stream_is_refused_as_something_to_reopen(
+    db_buffer: EventBuffer,
+) -> None:
+    protocol = _Protocol(db_buffer)
     conn = _open(protocol)
     protocol.connections.detach_stream(conn, conn.stream_generation)
 
     with pytest.raises(NoStreamAttachedError) as caught:
-        _beat(protocol, conn.stream_generation)
+        await _beat(protocol, conn.stream_generation)
 
     # Recoverable, and distinct from the takeover: this client still holds the
     # connection and only has to reconnect.

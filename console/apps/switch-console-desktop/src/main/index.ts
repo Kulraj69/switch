@@ -1,4 +1,6 @@
 import './app/configure-app-identity';
+// Installs the agent provider catalogue before any module that reads it loads.
+import './core/providers/plugin-registry';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { config as dotenvConfig } from 'dotenv';
@@ -6,10 +8,12 @@ import { app, BrowserWindow, dialog, ipcMain, powerMonitor } from 'electron';
 import dockIcon from '@/assets/images/switch-console/icon-dock.png?asset';
 import { PRODUCT_NAME } from '@shared/app-identity';
 import { registerRPCRouter } from '@shared/lib/ipc/rpc';
-import { flushPendingDeeplink, setupDeeplinks } from './app/deeplinks';
+import { deeplinkFromArgv, flushPendingDeeplink, setupDeeplinks } from './app/deeplinks';
 import { setupApplicationMenu } from './app/menu';
 import { APP_ORIGIN, registerAppScheme, setupAppProtocol } from './app/protocol';
+import { LaunchesWhileQuitting } from './app/relaunch-on-quit';
 import { createMainWindow, getMainWindow } from './app/window';
+import { startAutoMigration, stopAutoMigration } from './core/agent-migration/agent-migration';
 import { bridgeAgentEventsToRenderer } from './core/agents/agent-events-renderer-bridge';
 import { setAgentStorageMigrationReady } from './core/agents/agent-storage-migration-ready';
 import { migrateAgentStorage } from './core/agents/migrate-agent-storage';
@@ -18,10 +22,12 @@ import { appService } from './core/app/service';
 import { controlService } from './core/control-api/control-service';
 import { localDependencyManager } from './core/dependencies/dependency-managers';
 import { embeddedControllerService } from './core/embedded-controller/embedded-controllers';
+import { featureFlagsService } from './core/feature-flags/feature-flags';
 import { locationManager } from './core/locations/location-manager';
 import { locationSettingsService } from './core/locations/settings/location-settings-service';
 import { localServerService } from './core/managed-switch-server/local-server-service';
 import { remoteServerService } from './core/managed-switch-server/remote-server-service';
+import { serverVersionChoice } from './core/managed-switch-server/server-version';
 import { initializeHostReachability } from './core/remote-hosts/host-reachability-startup';
 import { hostReachabilityService } from './core/remote-hosts/production-host-reachability';
 import {
@@ -33,6 +39,7 @@ import { searchService } from './core/search/search-service';
 import { appSettingsService } from './core/settings/settings-service';
 import { sshConnectionManager } from './core/ssh/lifecycle/production-ssh-connection-manager';
 import { autoSessionWatcher } from './core/switch-rooms/auto-session-watcher';
+import { retireDashboardFallbacks } from './core/switch-servers/server-address';
 import { currentInternalFlag } from './core/telemetry/internal-account';
 import { readThisLaunch, reportLaunch } from './core/telemetry/launch-history';
 import { registerTelemetryListeners } from './core/telemetry/telemetry-listeners';
@@ -52,11 +59,15 @@ import { registerLogEnrichment } from './lib/log-enrichment';
 import { log } from './lib/logger';
 import { withRPCLogContext } from './lib/rpc-logging';
 import { rpcRouter } from './rpc';
-import { resolveUserEnv } from './utils/userEnv';
+import { ensureUserBinDirsInPath, resolveUserEnv } from './utils/userEnv';
 
 if (import.meta.env.DEV) {
   dotenvConfig({ path: '.env.local', override: false });
 }
+
+// A SWITCH_CONSOLE_SERVER_VERSION this run cannot honour stops the launch here,
+// naming the variable, rather than leaving managed servers on another version.
+serverVersionChoice();
 
 const LOCAL_HOST_SHUTDOWN_MS = 5000;
 
@@ -74,7 +85,16 @@ registerProcessErrorLogging(log);
 registerRendererLogHandler(ipcMain);
 logAppStart();
 
-app.on('second-instance', () => {
+// A launch while Console is quitting finds no window to show, and one opened
+// now would close with the exit, so Console starts again once it has quit.
+let quitting = false;
+const launchesWhileQuitting = new LaunchesWhileQuitting(deeplinkFromArgv);
+
+app.on('second-instance', (_event, commandLine) => {
+  if (quitting) {
+    launchesWhileQuitting.note(commandLine.slice(1));
+    return;
+  }
   const win = BrowserWindow.getAllWindows()[0];
   if (win?.isMinimized()) win.restore();
   win?.focus();
@@ -107,6 +127,7 @@ app.on('activate', () => {
 
 void app.whenReady().then(async () => {
   await resolveUserEnv();
+  ensureUserBinDirsInPath();
 
   try {
     await initializeDatabase();
@@ -199,6 +220,20 @@ void app.whenReady().then(async () => {
       log.error('Workspace reconcile could not run; every server was left as it was:', error);
     });
 
+  // A server registered with a separate dashboard address keeps it until the
+  // server serves its own dashboard and the old address has gone. Unawaited
+  // for the same reason as the reconcile: it asks every external server.
+  void retireDashboardFallbacks().catch((error: unknown) => {
+    log.error('Could not check which servers still need a separate dashboard address:', error);
+  });
+
+  // Each server's feature flags, read on a schedule so a redeploy that changes
+  // them reaches the window without a restart. Started once the managed stacks
+  // report themselves, for the same reason as the reconcile above.
+  void Promise.allSettled([localServerReady, remoteServerReady]).then(() =>
+    featureFlagsService.start()
+  );
+
   const dependenciesReady = localDependencyManager.probeAll().catch((e: unknown) => {
     log.error('Failed to probe dependencies:', e);
   });
@@ -244,13 +279,15 @@ void app.whenReady().then(async () => {
       log.error('Failed to initialise remote watchers at startup:', e);
     }
     // The managed agents this computer runs for a server, through the embedded
-    // agents controller. After the dependency probe, like the watchers above:
+    // agent controller. After the dependency probe, like the watchers above:
     // the controller resolves provider CLIs from the same environment.
     try {
       await embeddedControllerService.initialize();
     } catch (e) {
-      log.error('Failed to start the embedded agents controllers at startup:', e);
+      log.error('Failed to start the embedded agent controllers at startup:', e);
     }
+    // After the controllers: moving an agent onto this computer's controller needs it running.
+    startAutoMigration();
   });
 
   // A laptop waking from sleep usually has stale (frozen) SSH sockets to remote
@@ -283,9 +320,17 @@ void app.whenReady().then(async () => {
 
 app.on('before-quit', (event) => {
   event.preventDefault();
+  if (quitting) return;
+  quitting = true;
+  // Installing an update quits through here too, and the installer starts the
+  // new version itself. Starting Console as well could run the old executable
+  // while it is being replaced.
+  const updaterRestarts = updateService.getState().status === 'installing';
   logAppExit('before-quit');
   controlService.dispose();
+  stopAutoMigration();
   stopResourceSampler();
+  featureFlagsService.stop();
   localServerService.dispose();
   remoteServerService.dispose();
   updateService.dispose();
@@ -301,14 +346,24 @@ app.on('before-quit', (event) => {
       ]).catch((e) => {
         log.error('Failed to stop local SDK hosts:', e);
       }),
-      // The embedded agents controllers stop, and their agents and sessions with them.
+      // The embedded agent controllers stop, and their agents and sessions with them.
       embeddedControllerService.dispose().catch((e) => {
-        log.error('Failed to stop the embedded agents controllers:', e);
+        log.error('Failed to stop the embedded agent controllers:', e);
       }),
     ]);
     await locationManager.dispose().catch((e) => {
       log.error('Failed to shutdown location manager:', e);
     });
+    const relaunchArgs = launchesWhileQuitting.relaunchArgs();
+    if (relaunchArgs && !updaterRestarts) {
+      app.relaunch({ args: relaunchArgs });
+    } else if (relaunchArgs && launchesWhileQuitting.deeplink) {
+      // Nothing carries a deep link across a restart, so the updated Console
+      // starts without it.
+      log.warn('Dropped a deep link that arrived while Console quit to install an update', {
+        url: launchesWhileQuitting.deeplink,
+      });
+    }
     app.exit(0);
   })();
 });

@@ -13,18 +13,22 @@ fabricated memory figure on a developer's laptop is worse than a missing one.
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import os
-import resource
 import sys
 import threading
+import time
+from collections import deque
 from collections.abc import Iterator
 
 from switch_core.observability.catalogue import (
     RUNTIME_CPU_SECONDS,
     RUNTIME_EVENT_LOOP_LAG,
+    RUNTIME_EVENT_LOOP_STALLS,
     RUNTIME_GC_COLLECTIONS,
+    RUNTIME_GC_PAUSE,
     RUNTIME_MEMORY_RSS,
     RUNTIME_OPEN_FDS,
 )
@@ -34,6 +38,12 @@ logger = logging.getLogger(__name__)
 
 _PROC_STATM = "/proc/self/statm"
 _PROC_FD = "/proc/self/fd"
+
+# Pauses waiting to be drained into the registry. Young collections can run
+# many times a second under load, so the buffer is bounded; past this many in
+# one export interval the oldest are dropped, which costs resolution on the
+# cheap pauses and never hides the rare long one that arrives last.
+_MAX_PENDING_PAUSES = 50_000
 
 
 class EventLoopLag:
@@ -66,6 +76,75 @@ class EventLoopLag:
             worst = self._worst_ms
             self._worst_ms = 0.0
             return worst
+
+
+class GcPauses:
+    """How long each garbage collection stopped the process.
+
+    Fed from ``gc.callbacks``, which the collector calls on whatever thread
+    triggered the collection. Nothing in that callback may take a lock: a
+    collection can start while the same thread holds the metrics registry's
+    lock, and waiting on it there would deadlock. So the callback only appends
+    to a deque, which needs no lock, and :class:`RuntimeMetrics` drains it into
+    the registry when it collects.
+    """
+
+    def __init__(self) -> None:
+        self._started = 0.0
+        self._pauses: deque[tuple[int, float]] = deque(maxlen=_MAX_PENDING_PAUSES)
+
+    def install(self) -> None:
+        gc.callbacks.append(self._on_collection)
+
+    def uninstall(self) -> None:
+        if self._on_collection in gc.callbacks:
+            gc.callbacks.remove(self._on_collection)
+
+    def _on_collection(self, phase: str, info: dict[str, int]) -> None:
+        # Collections never overlap: the collector refuses to start while one
+        # is running, so a single start time is enough.
+        if phase == "start":
+            self._started = time.perf_counter()
+            return
+        pause_ms = (time.perf_counter() - self._started) * 1000.0
+        self._pauses.append((info["generation"], pause_ms))
+
+    def drain(self) -> list[tuple[int, float]]:
+        drained: list[tuple[int, float]] = []
+        while True:
+            try:
+                drained.append(self._pauses.popleft())
+            except IndexError:
+                return drained
+
+
+# How often the probe wakes. A stall is seen only while it overlaps a wake-up,
+# so the interval bounds how much of a stall the reading can miss: at 100 ms a
+# 300 ms freeze is always caught, and read to within 100 ms. The cost is ten
+# timer callbacks a second.
+LOOP_PROBE_INTERVAL_SECONDS = 0.1
+
+# Oversleep below this is scheduling jitter, not a stall.
+LOOP_STALL_THRESHOLD_SECONDS = 0.05
+
+
+async def watch_event_loop(
+    lag: EventLoopLag, interval_seconds: float = LOOP_PROBE_INTERVAL_SECONDS
+) -> None:
+    """Sleep in short steps and record how late each wake-up was.
+
+    Lateness is time the loop could not run anything, which is the thing to
+    measure. A long sleep would only see the part of a stall that overlaps its
+    own deadline: a 420 ms freeze during a 2 s sleep is usually missed and, when
+    seen, read as anything from 0 to 420 ms.
+    """
+    while True:
+        started = time.monotonic()
+        await asyncio.sleep(interval_seconds)
+        overslept = (time.monotonic() - started) - interval_seconds
+        lag.record(overslept)
+        if overslept >= LOOP_STALL_THRESHOLD_SECONDS:
+            metrics().observe(RUNTIME_EVENT_LOOP_STALLS, {}, overslept * 1000.0)
 
 
 def _resident_bytes() -> int | None:
@@ -105,11 +184,14 @@ class RuntimeMetrics:
     delta through a pre-collect hook. The rest are read at collection time.
     """
 
-    def __init__(self, lag: EventLoopLag) -> None:
+    def __init__(self, lag: EventLoopLag, gc_pauses: GcPauses) -> None:
         self._lag = lag
-        usage = resource.getrusage(resource.RUSAGE_SELF)
-        self._last_user = usage.ru_utime
-        self._last_system = usage.ru_stime
+        self._gc_pauses = gc_pauses
+        # os.times rather than resource.getrusage: the same two figures, and
+        # available on Windows, where the resource module does not exist.
+        usage = os.times()
+        self._last_user = usage.user
+        self._last_system = usage.system
         self._last_collections = self._collection_counts()
 
     def install(self, registry: MetricsRegistry) -> None:
@@ -123,16 +205,16 @@ class RuntimeMetrics:
     def _record_cumulative(self) -> None:
         registry = metrics()
 
-        usage = resource.getrusage(resource.RUSAGE_SELF)
+        usage = os.times()
         for mode, previous, current in (
-            ("user", self._last_user, usage.ru_utime),
-            ("system", self._last_system, usage.ru_stime),
+            ("user", self._last_user, usage.user),
+            ("system", self._last_system, usage.system),
         ):
             delta = current - previous
             if delta > 0:
                 registry.increment(RUNTIME_CPU_SECONDS, {"mode": mode}, delta)
-        self._last_user = usage.ru_utime
-        self._last_system = usage.ru_stime
+        self._last_user = usage.user
+        self._last_system = usage.system
 
         counts = self._collection_counts()
         for generation, current in enumerate(counts):
@@ -147,6 +229,11 @@ class RuntimeMetrics:
                     RUNTIME_GC_COLLECTIONS, {"generation": str(generation)}, delta
                 )
         self._last_collections = counts
+
+        for generation, pause_ms in self._gc_pauses.drain():
+            registry.observe(
+                RUNTIME_GC_PAUSE, {"generation": str(generation)}, pause_ms
+            )
 
     def _readings(self) -> Iterator[GaugeReading]:
         resident = _resident_bytes()

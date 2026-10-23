@@ -23,27 +23,18 @@ from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
-from switch_core.bridges.agent.api.hosted_worker_routes import (
-    admit_worker,
-    hosted_worker_only,
-)
 from switch_core.bridges.agent.api.schemas import (
-    AcceptTaskRequest,
     AgentInfo,
     AgentListResponse,
     BulkRegisterResult,
-    CancelTaskRequest,
     ConnectionPlacementsRequest,
     ConnectionRenewRequest,
     ConnectionSubscribeRequest,
     CreateModerationRoomRequest,
     CreateModerationRoomResponse,
-    DelegateTaskRequest,
-    DelegateTaskResponse,
     EventResponse,
     FeatureFlagInfo,
     FeatureFlagListResponse,
-    FinaliseTaskRequest,
     HistoryMessage,
     HistoryResponse,
     InviteAgentRequest,
@@ -69,14 +60,9 @@ from switch_core.bridges.agent.api.schemas import (
     RoomListResponse,
     RuntimeStateRequest,
     SendMessageRequest,
-    SetFeatureFlagRequest,
     StatusRequest,
-    TaskAgentsResponse,
-    TaskInfo,
-    TaskListResponse,
     TypingRequest,
     UpdateAgentRequest,
-    UpdateTaskRequest,
 )
 from switch_core.bridges.agent.auth import (
     get_agent_from_scope,
@@ -87,10 +73,10 @@ from switch_core.bridges.agent.dependencies import (
     get_protocol,
     get_session,
 )
-from switch_core.bridges.agent.hosted_mailbox import deliver_on_attach
+from switch_core.bridges.agent.protocol import positions
 from switch_core.bridges.agent.protocol.agent_connections import (
     HEARTBEAT_INTERVAL_SECONDS,
-    TAKEN_OVER,
+    MAX_ID_LENGTH,
     AgentConnection,
     ClientDeclaration,
     Closure,
@@ -106,8 +92,8 @@ from switch_core.bridges.agent.protocol.agent_connections import (
     evicted_session_warning,
 )
 from switch_core.bridges.agent.protocol.agent_core import AgentCore, AgentExistsError
-from switch_core.bridges.agent.protocol.event_buffer import Reader
-from switch_core.bridges.agent.protocol.hosted_workers import hosted_launch_of
+from switch_core.bridges.agent.protocol.event_buffer import TICKET_FLOOR, Reader
+from switch_core.bridges.agent.protocol.positions import OWN_EVENTS, Position
 from switch_core.bridges.agent.protocol.stream import (
     KEEPALIVE,
     Frame,
@@ -121,14 +107,12 @@ from switch_core.bridges.agent.registration_bootstrap import (
 )
 from switch_core.budgets import BudgetExceeded
 from switch_core.config import SwitchConfig
-from switch_core.db.models import Agent, HostedLaunch, Task, require_tenant_id
-from switch_core.db.session_scope import tenant_session
+from switch_core.db.models import Agent
 from switch_core.db.stores.api_key_store import ApiKeyStore
-from switch_core.db.stores.feature_flag_store import FeatureFlagStore
-from switch_core.feature_flags import is_known_flag
-from switch_core.gateway.known_agents import KNOWN_AGENTS
+from switch_core.gateway.known_agents import known_agent
 from switch_core.observability.catalogue import AGENT_CONNECTIONS_REFUSED
 from switch_core.observability.metrics import metrics
+from switch_core.trust.client import GuardrailBlockedError
 from switch_core.version import switch_core_version
 
 logger = logging.getLogger(__name__)
@@ -141,23 +125,6 @@ def parse_timestamp_ms(iso: str) -> int:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=UTC)
     return int(dt.timestamp() * 1000)
-
-
-def _task_info(task: Task) -> TaskInfo:
-    return TaskInfo(
-        id=task.id,
-        room_id=task.room_id,
-        requester_agent_id=task.requester_agent_id,
-        performer_agent_id=task.performer_agent_id,
-        summary=task.summary,
-        description=task.description,
-        status=task.status,
-        updates=task.updates or [],
-        outcome=task.outcome,
-        created_at=str(task.created_at),
-        accepted_at=str(task.accepted_at) if task.accepted_at else None,
-        finalised_at=str(task.finalised_at) if task.finalised_at else None,
-    )
 
 
 async def _resolve_registration_user_id(
@@ -266,7 +233,7 @@ async def _register_known(
     Returns ``(agent_id, api_key)``. Shared by the single and bulk
     register-known endpoints.
     """
-    spec = KNOWN_AGENTS.get(agent_type)
+    spec = known_agent(agent_type)
     if spec is None:
         raise HTTPException(
             status_code=400,
@@ -358,8 +325,8 @@ async def register_known_agents_bulk_endpoint(
     # overrides them: they should run in the same channels mode and use the
     # same repo dir as their parent.
     # The bridge exposes no GET-profile endpoint, so inheriting here means the
-    # caller (the configure skill) doesn't have to recover these from the
-    # parent — passing just `parent_agent_id` is enough.
+    # caller doesn't have to recover these from the parent — passing just
+    # `parent_agent_id` is enough.
     parent_md = parent.metadata_ if isinstance(parent.metadata_, dict) else {}
     parent_opts = parent_md.get("known_agent_options")
     inherited: dict[str, Any] = {}
@@ -466,12 +433,6 @@ async def delete_agent(
 ) -> dict[str, bool]:
     if agent.id != agent_id:
         raise HTTPException(status_code=403, detail="Not authorized for this agent")
-    if hosted_launch_of(agent.metadata_) is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="This is a cloud agent. Remove it from Switch Console's cloud agents instead.",
-        )
-
     try:
         await protocol.delete_agent(agent_id=agent_id)
     except ValueError as e:
@@ -496,6 +457,8 @@ async def send_message(
         event_id = await protocol.send_message(agent.id, req.room_id, req.content)
     except BudgetExceeded as e:
         raise HTTPException(status_code=429, detail=str(e)) from e
+    except GuardrailBlockedError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e)) from e
     except PermissionError as e:
@@ -686,6 +649,8 @@ async def update_status(
     if req.detail:
         try:
             await protocol.update_status(agent.id, req.room_id, req.detail)
+        except GuardrailBlockedError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         except PermissionError as e:
@@ -740,6 +705,7 @@ async def poll_events(
     scope: Annotated[str, Query()] = "single",
     event_filter: Annotated[str, Query(alias="filter")] = "all",
     start_from: Annotated[str, Query()] = "head",
+    start_at: Annotated[str | None, Query()] = None,
     spawn_capable: Annotated[bool, Query()] = False,
     protocol_version: Annotated[int | None, Query(alias="protocol")] = None,
     protocol_accepts: Annotated[int | None, Query()] = None,
@@ -769,25 +735,69 @@ async def poll_events(
             },
         )
 
-    if hosted_launch_of(agent.metadata_) is not None:
-        raise hosted_worker_only()
     events = await protocol.poll_events(agent.id, timeout=timeout)
     if not events:
         return Response(status_code=204)
     return EventResponse(events=events)
 
 
-def _resolve_start_cursor(protocol: AgentCore, agent_id: str, start_from: str) -> int:
-    """Where a connection's events begin: the head, or a sequence number."""
-    if start_from in ("", "head"):
-        return protocol.event_buffer.head(agent_id)
+async def _resolve_start_position(
+    protocol: AgentCore,
+    agent: Agent,
+    *,
+    start_at: str | None,
+    start_from: str,
+    reads_conversation: bool,
+) -> tuple[Position, int | None]:
+    """Work out the position a new connection starts sending events from.
+
+    Returns the position and, when the client sent a ticket id the server no
+    longer has, that id, so the stream can open with a gap that names it.
+    Otherwise the second value is None.
+
+    A client on agent-protocol revision 9 sends `start_at`: either "head" or
+    a position such as `{"s": 12, "r:<room_id>": 40}`. When the position has
+    no `s` entry, the connection starts at the current end of the agent's
+    own events.
+
+    An older client holds one integer and sends it as `start_from`. When the
+    connection reads only the agent's own events, the integer is their `seq`.
+    When it also reads the room conversation (`reads_conversation`), the
+    integer is a ticket id from `agent_position_tickets` and the position is
+    looked up there. A ticket that has expired or never existed starts the
+    connection at the end of the agent's own events, and the stream reports
+    the gap.
+    """
+    buffer = protocol.event_buffer
+    if start_at:
+        if start_at == "head":
+            return {OWN_EVENTS: await buffer.head(agent.tenant_id, agent.id)}, None
+        try:
+            position = positions.parse(start_at)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"start_at must be 'head' or a position: {exc}",
+            ) from exc
+        if OWN_EVENTS not in position:
+            position[OWN_EVENTS] = await buffer.head(agent.tenant_id, agent.id)
+        return position, None
+    raw = start_from
+    if raw in ("", "head"):
+        return {OWN_EVENTS: await buffer.head(agent.tenant_id, agent.id)}, None
     try:
-        return max(int(start_from), 0)
+        number = max(int(raw), 0)
     except ValueError as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"start_from must be 'head' or a sequence number, got {start_from!r}",
+            detail=f"start_from must be 'head' or a sequence number, got {raw!r}",
         ) from exc
+    if reads_conversation and number >= TICKET_FLOOR:
+        held = await buffer.ticket(agent.tenant_id, agent.id, number)
+        if held is None:
+            return {OWN_EVENTS: await buffer.head(agent.tenant_id, agent.id)}, number
+        return held, None
+    return {OWN_EVENTS: number}, None
 
 
 def _register_connection(
@@ -798,7 +808,7 @@ def _register_connection(
     scope: str,
     event_filter: str,
     spawn_capable: bool,
-    cursor: int,
+    position: Position,
     declaration: ClientDeclaration,
     expected_generation: int | None,
 ) -> AgentConnection:
@@ -809,7 +819,7 @@ def _register_connection(
             scope=cast(Scope, scope),
             delivery_filter=cast(DeliveryFilter, event_filter),
             spawn_capable=spawn_capable,
-            cursor=cursor,
+            position=position,
             declaration=declaration,
             expected_generation=expected_generation,
         )
@@ -855,13 +865,10 @@ async def _open_connection(
     event_filter: str,
     start_from: str,
     spawn_capable: bool,
+    start_at: str | None = None,
     declaration: ClientDeclaration,
     rooms: str | None,
     expected_generation: int | None,
-    worker_capability: str | None = None,
-    host_boot_id: str | None = None,
-    host_instance_id: str | None = None,
-    worker_state_version: int | None = None,
 ) -> tuple[AgentConnection, AsyncGenerator[Frame]]:
     """Open or reattach the connection and claim its declared rooms.
 
@@ -874,6 +881,12 @@ async def _open_connection(
             "UUID and reuse it when reconnecting so the connection survives the "
             "drop",
         )
+    if len(connection_id) > MAX_ID_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"connection_id must be at most {MAX_ID_LENGTH} characters, and "
+            f"this one is {len(connection_id)}; generate a UUID",
+        )
     if scope not in ("single", "all"):
         raise HTTPException(
             status_code=400, detail=f"scope must be 'single' or 'all', got {scope!r}"
@@ -884,48 +897,37 @@ async def _open_connection(
             detail=f"filter must be 'all' or 'addressed', got {event_filter!r}",
         )
 
-    cursor = _resolve_start_cursor(protocol, agent.id, start_from)
+    position, lost = await _resolve_start_position(
+        protocol,
+        agent,
+        start_at=start_at,
+        start_from=start_from,
+        reads_conversation=event_filter == "all",
+    )
 
-    def register() -> AgentConnection:
-        return _register_connection(
-            protocol=protocol,
-            agent=agent,
-            connection_id=connection_id,
-            scope=scope,
-            event_filter=event_filter,
-            spawn_capable=spawn_capable,
-            cursor=cursor,
-            declaration=declaration,
-            expected_generation=expected_generation,
-        )
-
-    launch_id = hosted_launch_of(agent.metadata_)
-    if launch_id is None:
-        conn = register()
-    else:
-        # Admission, the open and the binding all happen under the launch
-        # lock, so no revision bump lands between the check and the bind.
-        async with tenant_session(protocol.session_factory, require_tenant_id()) as db:
-            attach = await admit_worker(
-                session=db,
-                registry=protocol.connections,
-                config=config,
-                agent=agent,
-                launch_id=launch_id,
-                connection_id=connection_id,
-                declaration=declaration,
-                capability=worker_capability,
-                boot_id=host_boot_id,
-                instance_id=host_instance_id,
-                state_version=worker_state_version,
-            )
-            conn = register()
-            if attach.takes_over is not None and attach.takes_over.id != conn.id:
-                protocol.connections.close(attach.takes_over.id, TAKEN_OVER)
-            protocol.connections.bind_worker(conn, attach.binding, attach.attached)
-            launch = await db.get(HostedLaunch, (require_tenant_id(), launch_id))
-            assert launch is not None
-            await deliver_on_attach(db, protocol, launch)
+    # Opened as a recorded move, so a reattach is fenced on the incarnation
+    # every process sees, and the connection is recorded for them before the
+    # client is told it is open. Recording it is refused, as opening it is,
+    # when the id is another agent's connection's.
+    try:
+        async with protocol.connections.slots(agent.id):
+            async with protocol.connections.recorded(agent.id):
+                conn = _register_connection(
+                    protocol=protocol,
+                    agent=agent,
+                    connection_id=connection_id,
+                    scope=scope,
+                    event_filter=event_filter,
+                    spawn_capable=spawn_capable,
+                    position=position,
+                    declaration=declaration,
+                    expected_generation=expected_generation,
+                )
+    except UnknownConnectionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if lost is not None:
+        conn.resume_lost = True
+        conn.resume_requested = lost
 
     # Built before anything below can yield, so it holds the generation this
     # open produced; a reconnect during the bookkeeping supersedes it rather
@@ -961,10 +963,15 @@ async def _open_connection(
             # share connections keeps the slot, and the supervisor's restored
             # stream 409s and retries forever.
             async with protocol.connections.slots(agent.id):
-                protocol.connections.claim_room(conn, room_id, takeover=True)
-            # The room's unread count follows the slot: whoever is told how far
-            # behind the room is has to be the one whose reading clears it.
-            protocol.event_buffer.take_counting(agent.id, conn.id, room_id, conn.cursor)
+                async with protocol.connections.recorded(agent.id):
+                    protocol.connections.claim_room(conn, room_id, takeover=True)
+                # The room's unread count follows the slot: whoever is told how
+                # far behind the room is has to be the one whose reading clears
+                # it. Recorded with the slots still held, so a later claim of
+                # the room cannot have its count overwritten by this one.
+                await protocol.event_buffer.take_counting(
+                    agent.tenant_id, agent.id, conn.id, room_id
+                )
         except (ValueError, PermissionError) as exc:
             protocol.connections.close(
                 conn.id,
@@ -1004,25 +1011,21 @@ def _record_beat(
     protocol: AgentCore,
     agent_id: str,
     connection_id: str,
-    cursor: int,
-    generation: int,
+    generation: int | None,
 ) -> AgentConnection:
-    """Count a client's answer to a ping as a beat, and adopt its cursor.
+    """Count a client's beat: the client is still there.
 
-    The cursor is clamped to the buffer head first. The buffer is in memory,
-    so a restart resets the sequence while a client keeps reporting the
-    number it had reached, and neither `beat()` nor `confirm()` will move a
-    cursor backwards: adopting the stale number would skip every event up to
-    it, silently, and mark them consumed on the way past.
+    A beat is a pong on the WebSocket. Clients also report how far they have
+    read; it is not read here. The connection's position is moved only by the
+    stream, as it sends, and a client that drops resumes from the position it
+    sends when it reopens, which is checked against the database then. So a
+    beat costs no database query.
 
     Raises the registry's refusal when the connection is no longer this
     client's to beat for: another socket took it over (`taken_over`), or it
     has no stream attached (`no_stream`), or it is gone.
     """
-    cursor = min(cursor, protocol.event_buffer.head(agent_id))
-    conn = protocol.connections.beat(agent_id, connection_id, cursor, generation)
-    protocol.event_buffer.confirm(agent_id, conn.id, cursor)
-    return conn
+    return protocol.connections.beat(agent_id, connection_id, generation)
 
 
 # A WebSocket close code for each refusal that would otherwise be an HTTP
@@ -1042,6 +1045,7 @@ async def connection_socket(
     scope: Annotated[str, Query()] = "single",
     event_filter: Annotated[str, Query(alias="filter")] = "all",
     start_from: Annotated[str, Query()] = "head",
+    start_at: Annotated[str | None, Query()] = None,
     spawn_capable: Annotated[bool, Query()] = False,
     protocol_version: Annotated[int | None, Query(alias="protocol")] = None,
     protocol_accepts: Annotated[int | None, Query()] = None,
@@ -1049,37 +1053,20 @@ async def connection_socket(
     client: Annotated[str | None, Query()] = None,
     client_version: Annotated[str | None, Query()] = None,
     rooms: Annotated[str | None, Query()] = None,
-    worker_capability: Annotated[
-        str | None, Header(alias="x-switch-worker-capability")
-    ] = None,
-    host_boot_id: Annotated[str | None, Header(alias="x-switch-host-boot-id")] = None,
-    host_instance_id: Annotated[
-        str | None, Header(alias="x-switch-host-instance-id")
-    ] = None,
-    worker_state_version: Annotated[
-        int | None, Header(alias="x-switch-worker-state-version")
-    ] = None,
 ) -> None:
     """The agent's connection over one WebSocket: events down, heartbeats up.
 
-    Opens exactly as the event stream does (same parameters, same fencing,
-    same room claims) and carries the same frames, as JSON
-    `{"event", "data", "id"}`. Authenticated once, when the socket opens.
+    Carries the agent's frames as JSON `{"event", "data", "id"}`.
+    Authenticated once, when the socket opens.
 
-    The heartbeat runs the other way round from `/connection/beat`: the server
-    sends a `ping` frame every heartbeat interval and the client answers
-    `{"type": "pong", "cursor": n}`, which counts as a beat. A client that
+    The server sends a `ping` frame every heartbeat interval and the client
+    answers `{"type": "pong", "cursor": n}`, which counts as a beat. A client that
     stops answering lapses like one that stops beating. No request per beat,
     and no token lookup.
 
     A refusal on opening is sent as a `refused` frame carrying the status and
     detail an HTTP request would have been answered with, then the socket closes
     with code 4000 plus that status.
-
-    A hosted agent's worker opens it with its capability and host identity in
-    the `X-Switch-Worker-*` and `X-Switch-Host-*` headers, and is admitted or
-    refused by the rules of agent-protocol 7. Its frames come down the socket;
-    its up-calls stay HTTP requests.
     """
     await websocket.accept()
     try:
@@ -1091,6 +1078,7 @@ async def connection_socket(
             scope=scope,
             event_filter=event_filter,
             start_from=start_from,
+            start_at=start_at,
             spawn_capable=spawn_capable,
             declaration=ClientDeclaration(
                 speaks=protocol_version,
@@ -1100,10 +1088,6 @@ async def connection_socket(
             ),
             rooms=rooms,
             expected_generation=expected_generation,
-            worker_capability=worker_capability,
-            host_boot_id=host_boot_id,
-            host_instance_id=host_instance_id,
-            worker_state_version=worker_state_version,
         )
     except HTTPException as exc:
         metrics().increment(AGENT_CONNECTIONS_REFUSED, {"reason": _refusal_reason(exc)})
@@ -1166,6 +1150,11 @@ async def connection_socket(
         pump.cancel()
         pongs.cancel()
         failure = pump.exception() if pump.done() and not pump.cancelled() else None
+        # Cancelling the tasks only requests that they stop. The pump's cleanup
+        # may be in the middle of a database read, so this waits for both to
+        # finish before returning, which guarantees the stream has detached
+        # from the connection by then.
+        await asyncio.gather(pump, pongs, return_exceptions=True)
         if failure is not None:
             logger.error(
                 "[STREAM] agent=%s connection=%s delivery failed, closing its socket",
@@ -1217,12 +1206,55 @@ async def _receive_pongs(
             return None
         if not isinstance(message, dict) or message.get("type") != "pong":
             continue
-        raw = message.get("cursor", 0)
-        cursor = raw if isinstance(raw, int) and raw >= 0 else 0
         try:
-            _record_beat(protocol, agent_id, connection_id, cursor, generation)
+            _record_beat(protocol, agent_id, connection_id, generation)
         except ConnectionError_ as refusal:
             return refusal
+
+
+def _held_here(protocol: AgentCore, connection_id: str) -> bool:
+    conn = protocol.connections.get(connection_id)
+    return conn is not None and conn.held_by is None
+
+
+def _presents_later(
+    protocol: AgentCore, connection_id: str, generation: int | None
+) -> bool:
+    """Whether the caller names a later incarnation than this process has.
+
+    Every incarnation of a connection is later than the ones before it, so a
+    later one presented was opened through another process after this one
+    last read the rows: this process's copy is the stale one, not the
+    caller's."""
+    conn = protocol.connections.get(connection_id)
+    return (
+        conn is not None
+        and generation is not None
+        and generation > conn.stream_generation
+    )
+
+
+async def _admitted_connection(
+    protocol: AgentCore,
+    agent: Agent,
+    req: ConnectionSubscribeRequest | ConnectionPlacementsRequest,
+) -> AgentConnection:
+    """The first check, before anything is read on the caller's behalf.
+
+    A connection held by another process is checked against this process's
+    copy, which may be a moment old, and so is one held here when the caller
+    names a later incarnation, so a refusal is checked again on the recorded
+    row before it is given. The check that decides is `_current_connection`,
+    made again inside the recorded move."""
+    try:
+        return _current_connection(protocol, agent, req)
+    except HTTPException:
+        if _held_here(protocol, req.connection_id) and not _presents_later(
+            protocol, req.connection_id, req.generation
+        ):
+            raise
+    await protocol.connections.refresh(agent.id)
+    return _current_connection(protocol, agent, req)
 
 
 def _current_connection(
@@ -1236,10 +1268,6 @@ def _current_connection(
     the client on it. Asked again after any wait, because what a caller was
     admitted on is not what it is still holding.
     """
-    if hosted_launch_of(agent.metadata_) is not None:
-        named = protocol.connections.get(req.connection_id)
-        if named is None or named.agent_id != agent.id or named.worker is None:
-            raise hosted_worker_only()
     try:
         return protocol.connections.require_current(
             agent.id, req.connection_id, generation=req.generation
@@ -1272,7 +1300,7 @@ async def connection_subscribe(
     door names no session, so the connection is the whole of what it is, and
     replacing is what it has always been promised.
     """
-    conn = _current_connection(protocol, agent, req)
+    conn = await _admitted_connection(protocol, agent, req)
 
     try:
         await protocol.require_room_member(agent.id, req.room_id)
@@ -1282,29 +1310,37 @@ async def connection_subscribe(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     async with protocol.connections.slots(agent.id):
-        departing = (
-            frozenset(conn.rooms - {req.room_id})
-            if conn.scope == "single"
-            else frozenset()
-        )
-        # Named again now the wait for the slots is over, and with nothing
-        # awaited between here and the write: a client displaced while it waited
-        # would otherwise move a room on the connection its successor holds.
-        conn = _current_connection(protocol, agent, req)
-        try:
-            evicted = protocol.connections.claim_room(
-                conn, req.room_id, takeover=req.takeover
+        async with protocol.connections.recorded(agent.id):
+            # Named again now the wait for the slots is over, and with nothing
+            # awaited between here and the write: a client displaced while it
+            # waited would otherwise move a room on the connection its successor
+            # holds.
+            conn = _current_connection(protocol, agent, req)
+            departing = (
+                frozenset(conn.rooms - {req.room_id})
+                if conn.scope == "single"
+                else frozenset()
             )
-        except RoomOccupiedError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            try:
+                evicted = protocol.connections.claim_room(
+                    conn, req.room_id, takeover=req.takeover
+                )
+            except RoomOccupiedError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-        for departed in departing:
-            protocol.connections.release_room(conn, departed)
+            for departed in departing:
+                protocol.connections.release_room(conn, departed)
 
-    # A room slot changes hands here as much as it does on the stream URL or in
-    # connect_to_room, and the room's unread count follows it: the holder being
-    # told how far behind the room is has to be the one whose reading clears it.
-    protocol.event_buffer.take_counting(agent.id, conn.id, req.room_id, conn.cursor)
+        # A room slot changes hands here as much as it does on the stream URL
+        # or in connect_to_room, and the room's unread count follows it: the
+        # holder being told how far behind the room is has to be the one whose
+        # reading clears it. Handed over after the claim is recorded, so a
+        # claim that fails hands nothing over, and before the slots are let go,
+        # so a later claim of the room cannot have its count overwritten by
+        # this one.
+        await protocol.event_buffer.take_counting(
+            agent.tenant_id, agent.id, conn.id, req.room_id
+        )
 
     if evicted is not None:
         logger.warning(
@@ -1335,9 +1371,12 @@ async def connection_unsubscribe(
     protocol: Annotated[AgentCore, Depends(get_protocol)],
 ) -> dict[str, Any]:
     """Release a room, returning coverage to any all-scope connection."""
-    conn = _current_connection(protocol, agent, req)
+    conn = await _admitted_connection(protocol, agent, req)
 
-    async with protocol.connections.slots(agent.id):
+    async with (
+        protocol.connections.slots(agent.id),
+        protocol.connections.recorded(agent.id),
+    ):
         conn = _current_connection(protocol, agent, req)
         protocol.connections.release_room(conn, req.room_id)
     return {"ok": True, "rooms": sorted(conn.rooms)}
@@ -1356,15 +1395,22 @@ async def connection_placements(
     here after each change and on every (re)connect, so a restart of either
     side converges on what the watcher knows. A room another connection holds
     is taken over, as `connect_to_room` takes it, and that connection is sent
-    `room_released`. Every room must be one the agent belongs to; one that is
-    not refuses the whole request and changes nothing.
+    `room_released`. Every room must be one the agent belongs to, and every
+    session id at most `MAX_ID_LENGTH` characters; a request that breaks
+    either is refused whole and changes nothing.
     """
     if agent_id != agent.id:
         raise HTTPException(
             status_code=403,
             detail=f"authenticated as agent {agent.id}, not {agent_id}",
         )
-    conn = _current_connection(protocol, agent, req)
+    if any(len(session_id) > MAX_ID_LENGTH for session_id in req.placements):
+        raise HTTPException(
+            status_code=400,
+            detail=f"a session id must be at most {MAX_ID_LENGTH} characters; "
+            "nothing was placed",
+        )
+    conn = await _admitted_connection(protocol, agent, req)
 
     for room_id in sorted(set(req.placements.values())):
         try:
@@ -1375,18 +1421,26 @@ async def connection_placements(
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     async with protocol.connections.slots(agent.id):
-        conn = _current_connection(protocol, agent, req)
-        before = protocol.connections.connection_placements(conn)
-        try:
-            released = protocol.connections.replace_placements(conn, req.placements)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        async with protocol.connections.recorded(agent.id):
+            conn = _current_connection(protocol, agent, req)
+            before = protocol.connections.connection_placements(conn)
+            try:
+                released = protocol.connections.replace_placements(conn, req.placements)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    for session_id, room_id in req.placements.items():
-        if before.get(session_id) != room_id:
-            protocol.event_buffer.hand_counting_to(
-                agent.id, Reader(id=session_id, is_session=True), room_id
-            )
+        # Each moved session takes its room's unread count: after the move is
+        # recorded, so a move that fails hands nothing over, and before the
+        # slots are let go, so a later claim of the room cannot have its count
+        # overwritten by this one.
+        for session_id, room_id in req.placements.items():
+            if before.get(session_id) != room_id:
+                await protocol.event_buffer.hand_counting_to(
+                    agent.tenant_id,
+                    agent.id,
+                    Reader(id=session_id, is_session=True),
+                    room_id,
+                )
     for lost in released:
         logger.warning(
             "[CONN] agent=%s connection=%s took room %s from connection %s "
@@ -1422,7 +1476,7 @@ async def poll_notifications(
 ) -> EventResponse | Response:
     """Long-poll the agent's notification stream across all its rooms.
 
-    Returns notifiable events only (addressed messages, task events, room_join
+    Returns notifiable events only (addressed messages and the room_join
     events the agent listens for). Backed by a separate queue, so it never
     drains the per-room event queues live session pollers consume. Used by the
     auto_session watcher to decide when to spawn a session.
@@ -1530,188 +1584,6 @@ async def list_participants(
     ]
 
     return ParticipantsResponse(participants=participants)
-
-
-# Tasks endpoints
-
-
-@router.post("/{agent_id}/tasks/delegate")
-async def delegate_task(
-    agent_id: str,
-    req: DelegateTaskRequest,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> DelegateTaskResponse:
-    # TODO: do we still need this ?
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        result = await protocol.delegate_task(
-            requester_id=agent.id,
-            room_id=req.room_id,
-            performer_id=req.performer_agent_id,
-            summary=req.summary,
-            description=req.description,
-        )
-        task = await protocol.get_task(agent.id, result.task_id)
-    except BudgetExceeded as e:
-        raise HTTPException(status_code=429, detail=str(e)) from e
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return DelegateTaskResponse(
-        task=_task_info(task), target_status=result.target_status
-    )
-
-
-@router.post("/{agent_id}/tasks/accept")
-async def accept_task(
-    agent_id: str,
-    req: AcceptTaskRequest,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> TaskInfo:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        await protocol.accept_task(agent.id, req.task_id)
-        task = await protocol.get_task(agent.id, req.task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return _task_info(task)
-
-
-@router.post("/{agent_id}/tasks/cancel")
-async def cancel_task(
-    agent_id: str,
-    req: CancelTaskRequest,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> TaskInfo:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        await protocol.cancel_task(agent.id, req.task_id, req.reason)
-        task = await protocol.get_task(agent.id, req.task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return _task_info(task)
-
-
-@router.get("/{agent_id}/tasks")
-async def list_tasks(
-    agent_id: str,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-    room_id: Annotated[str | None, Query()] = None,
-    role: Annotated[str | None, Query(description="'delegated' or 'assigned'")] = None,
-    status: Annotated[str | None, Query()] = None,
-) -> TaskListResponse:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    tasks = await protocol.list_tasks(
-        agent.id, room_id=room_id, role=role, status=status
-    )
-    return TaskListResponse(tasks=[_task_info(t) for t in tasks])
-
-
-@router.get("/{agent_id}/tasks/{task_id}")
-async def get_task(
-    agent_id: str,
-    task_id: str,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> TaskInfo:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        task = await protocol.get_task(agent.id, task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return _task_info(task)
-
-
-@router.get("/{agent_id}/tasks/agents")
-async def list_task_agents(
-    agent_id: str,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-    room_id: Annotated[str, Query()],
-) -> TaskAgentsResponse:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        performers = await protocol.list_delegatable_agents(agent.id, room_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    agents = [
-        AgentInfo(id=p.id, name=p.name, description="", display_name=p.display_name)
-        for p in performers
-    ]
-
-    return TaskAgentsResponse(agents=agents)
-
-
-@router.post("/{agent_id}/tasks/update")
-async def update_task(
-    agent_id: str,
-    req: UpdateTaskRequest,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> TaskInfo:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        await protocol.update_task(agent.id, req.task_id, req.update)
-        task = await protocol.get_task(agent.id, req.task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return _task_info(task)
-
-
-@router.post("/{agent_id}/tasks/finalise")
-async def finalise_task(
-    agent_id: str,
-    req: FinaliseTaskRequest,
-    agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    protocol: Annotated[AgentCore, Depends(get_protocol)],
-) -> TaskInfo:
-    if agent.id != agent_id:
-        raise HTTPException(status_code=403, detail="Not authorized for this agent")
-
-    try:
-        await protocol.finalise_task(agent.id, req.task_id, req.outcome)
-        task = await protocol.get_task(agent.id, req.task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
-    except PermissionError as e:
-        raise HTTPException(status_code=403, detail=str(e)) from e
-
-    return _task_info(task)
 
 
 # Reporting endpoint
@@ -1993,34 +1865,15 @@ async def list_bridges(
 @router.get("/feature-flags")
 async def list_feature_flags(
     _agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    session: Annotated[AsyncSession, Depends(get_session)],
+    config: Annotated[SwitchConfig, Depends(get_config)],
 ) -> FeatureFlagListResponse:
-    """List every server-global feature flag and its current state.
+    """List every feature flag and whether this deployment turned it on.
 
-    Any authenticated agent may read the flags.
+    Any authenticated agent may read them. Flags are set at deploy time
+    (`FEATURE_FLAGS_ENABLED`); nothing can change them through the API.
     """
-    flags = await FeatureFlagStore().get_all(session)
     return FeatureFlagListResponse(
-        flags=[FeatureFlagInfo(key=k, enabled=v) for k, v in sorted(flags.items())]
+        flags=[
+            FeatureFlagInfo(key=k, enabled=v) for k, v in config.feature_flags.items()
+        ]
     )
-
-
-@router.put("/feature-flags/{key}")
-async def set_feature_flag(
-    key: str,
-    req: SetFeatureFlagRequest,
-    _agent: Annotated[Agent, Depends(get_agent_from_scope)],
-    session: Annotated[AsyncSession, Depends(get_session)],
-) -> FeatureFlagInfo:
-    """Flip a server-global feature flag on or off.
-
-    Gated by any valid agent API token. Only keys in the known-flag registry
-    are accepted so the endpoint cannot write arbitrary rows.
-    """
-    if not is_known_flag(key):
-        raise HTTPException(status_code=400, detail=f"Unknown feature flag: {key}")
-
-    store = FeatureFlagStore()
-    await store.set(session, key, req.enabled)
-    await session.commit()
-    return FeatureFlagInfo(key=key, enabled=req.enabled)

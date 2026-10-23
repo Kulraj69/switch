@@ -10,6 +10,16 @@ export const EXIT_CONFIGURATION = 2;
 export const EXIT_REVOKED = 3;
 /** Another instance of this controller took its stream over. */
 export const EXIT_TAKEN_OVER = 4;
+/** The server does not speak this controller's protocol. Update the controller. */
+export const EXIT_UPGRADE_REQUIRED = 5;
+/** The server knows no controller by this credential. It has to be enrolled again. */
+export const EXIT_CREDENTIAL_INVALID = 6;
+/**
+ * The controller installed the release Switch names and ends to be started on
+ * it: a service restarts it (systemd's `Restart=on-failure`, launchd's
+ * `KeepAlive`), so 7 must never be among the codes it is kept from restarting on.
+ */
+export const EXIT_RESTARTING = 7;
 
 /**
  * The exit code a command that threw `error` ends with: configuration errors,

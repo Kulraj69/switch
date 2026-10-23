@@ -1,7 +1,7 @@
 """Agent operations on the owner's agent management: machines and managed agents.
 
 These exist only on a server running agent management
-(`AGENT_MANAGEMENT_ENABLED`): they are declared in their own operation group,
+(the `agent_management` feature flag): they are declared in their own operation group,
 and the group is enabled when the process wiring hands over management's
 implementation of `AgentManagementPort` (`enable_agent_management`). Until
 then they are on neither front door.
@@ -101,6 +101,16 @@ async def management_permission() -> Permitted | str:
     return Permitted(tenant_id=require_tenant_id(), owner=owner)
 
 
+def refuse_managing_self(agent_id: str) -> None:
+    """Refuse an agent changing itself: its settings, permissions and services
+    are its owner's to change, never its own."""
+    if agent_id == get_agent_id():
+        raise PermissionError(
+            "An agent can't change its own settings, permissions or services. "
+            "Your owner changes them on your page in Switch Console."
+        )
+
+
 async def permitted_to_manage() -> Permitted:
     """The calling agent's owner, once the agent is allowed to act on the
     owner's agent management; a clear refusal otherwise."""
@@ -123,8 +133,9 @@ async def list_machines() -> list[dict[str, Any]]:
         A list of machines, each {id, name, description, kind, state,
         last_seen_at, providers, agents_running}.
         `kind` is "console" (Switch Console's own machine), "daemon" (a
-        headless controller) or "ec2". `state` is "online" (reporting now) or
-        "unknown" (has not reported recently: asleep, off or disconnected).
+        headless controller) or "ec2". `state` is "online" (connected to Switch
+        now), "offline" (was connected, and is not now: stopped, asleep, off
+        or disconnected) or "unknown" (has never connected).
         `providers` lists the agent CLIs the machine last reported, each
         {provider, installed, version, auth}, `auth` being "ok", "missing",
         "expired" or "unknown". `agents_running` counts the managed agents
@@ -144,7 +155,9 @@ async def get_advanced_config(provider: str) -> list[dict[str, Any]]:
     the provider, the same "Advanced configuration" Switch Console offers.
 
     Args:
-        provider: "claude", "codex", "opencode", "antigravity" or "cursor".
+        provider: A provider's id, as `list_machines` reports it, such as
+            "claude" for Claude Code. An unknown id is refused with the ids
+            Switch runs.
 
     Returns:
         A list of fields, each {key, label, type, help, placeholder, options,
@@ -172,6 +185,7 @@ async def create_agent(
     advanced_config: dict[str, Any] | None = None,
     instructions: str = "",
     directory: str | None = None,
+    auto_mode: bool = True,
     auto_approve: bool = False,
     display_name: str | None = None,
     icon_url: str | None = None,
@@ -181,8 +195,9 @@ async def create_agent(
 
     Requires the "can manage agents" capability, which your owner turns on for
     you. The new agent is owned by your owner (not by you), runs on the
-    machine you name, and only your owner can address it until they say
-    otherwise. It does not get the "can manage agents" capability itself.
+    machine you name, and can be addressed by your owner and your owner's
+    other agents (you included) until they say otherwise. It does not get the
+    "can manage agents" capability itself.
     Confirm the name, machine and provider with the person asking before you
     call this: it creates a real agent on their computer.
 
@@ -198,8 +213,9 @@ async def create_agent(
         machine: The machine's `id`, or its exact `name`, from
             `list_machines`. A name shared by several machines is refused with
             the candidates listed; pass the id instead.
-        provider: The agent CLI to run: "claude" (Claude Code), "codex",
-            "opencode", "antigravity" or "cursor".
+        provider: The agent CLI to run, by its id as `list_machines` reports
+            it, such as "claude" for Claude Code. An unknown id is refused
+            with the ids Switch runs.
         model: The model to run, or null for the provider's default.
         advanced_config: The provider's advanced settings, such as
             {"effort": "high"} for Claude Code or Codex, keyed by the fields
@@ -211,10 +227,18 @@ async def create_agent(
             when the machine has reported where it keeps workspaces, and the
             machine makes the directory if it is missing. Any other directory
             must already exist there.
-        auto_approve: Let the agent run tools without asking for approval.
+        auto_mode: Auto mode, on by default: the provider's own automatic
+            review lets safe actions run without asking and still asks a
+            person before risky ones. Leave it on unless the person asks for
+            every action to be approved.
+        auto_approve: Bypass mode: the agent runs every tool without any
+            permission check, and this overrides `auto_mode`. Unsafe; set it
+            only when the person explicitly asks for bypass.
         display_name: A human label shown next to `name`, or null for none.
-        icon_url: An https link to the agent's icon, or null for the robot
-            its name generates, the same one Switch Console offers first.
+        icon_url: An https link to the agent's icon, or null for the icon
+            its name generates, the same one Switch Console offers first. A
+            server with third-party avatars off generates none, and the agent
+            then shows each platform's default icon.
         start: Start the agent now (true) or create it stopped (false).
 
     Returns:
@@ -239,7 +263,9 @@ async def create_agent(
             advanced_config={} if advanced_config is None else advanced_config,
             instructions=instructions,
             directory=directory,
+            auto_mode=auto_mode,
             auto_approve=auto_approve,
+            isolation="shared",
             start=start,
         ),
         get_protocol(),
@@ -255,12 +281,15 @@ async def list_managed_agents() -> list[dict[str, Any]]:
 
     Returns:
         A list of managed agents, each {agent_id, name, display_name,
-        description, provider, model, advanced_config, directory, machine,
-        desired_state, actual, revision}.
+        description, provider, model, advanced_config, auto_mode,
+        auto_approve, directory, machine, desired_state, actual, revision}.
+        `auto_mode` is whether the provider's automatic review decides which
+        actions need a person's approval. `auto_approve` is bypass: it runs
+        every tool without asking anyone, whatever `auto_mode` says.
         `directory` is the working directory the definition names (null only
         when its machine has not said where it keeps workspaces).
         `machine` is {id, name, state} (null when the agent is not placed on
-        a machine), `state` being "online", "unknown" or "revoked".
+        a machine), `state` being "online", "offline", "unknown" or "revoked".
         `desired_state` is what your owner wants: "running" or "stopped".
         `actual` is what the machine last reported for the agent,
         {process, reason, detail, applied_revision, since, directory}, or

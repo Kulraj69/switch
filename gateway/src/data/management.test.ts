@@ -4,7 +4,10 @@ import {
   createManagedAgent,
   enrollCommand,
   fetchManagementAvailable,
+  fetchProviders,
   managementError,
+  providerLabel,
+  shellQuote,
 } from "./management";
 
 function respond(status: number, body: unknown) {
@@ -86,6 +89,7 @@ describe("createManagedAgent", () => {
           provider: "claude",
           model: null,
           instructions: "",
+          auto_mode: true,
           auto_approve: false,
           directory: null,
           isolation: "shared",
@@ -99,15 +103,55 @@ describe("createManagedAgent", () => {
     expect(JSON.parse(init.body as string)).toMatchObject({
       name: "pm-agent",
       controller_id: "c1",
-      definition: { provider: "claude" },
+      definition: { provider: "claude", auto_mode: true, auto_approve: false },
     });
   });
 });
 
 describe("enrollCommand", () => {
   it("names the server and the code", () => {
-    expect(enrollCommand("https://switch.example.com", "swce_example")).toBe(
-      "switch-agent-controller enroll --server https://switch.example.com --code swce_example",
+    expect(
+      enrollCommand("https://switch.example.com", "swce_example", { name: "", description: " " }),
+    ).toBe("switch-agent-controller enroll --server https://switch.example.com --code swce_example");
+  });
+
+  it("adds the name and description, quoted for the shell", () => {
+    expect(
+      enrollCommand("https://switch.example.com", "swce_example", {
+        name: " build-box ",
+        description: "Bob's box: $HOME `x` \"y\"",
+      }),
+    ).toBe(
+      "switch-agent-controller enroll --server https://switch.example.com --code swce_example" +
+        " --name build-box --description 'Bob'\\''s box: $HOME `x` \"y\"'",
     );
+  });
+});
+
+describe("shellQuote", () => {
+  it("leaves plain words alone and single-quotes the rest", () => {
+    expect(shellQuote("swce_a-b.c")).toBe("swce_a-b.c");
+    expect(shellQuote("two words")).toBe("'two words'");
+    expect(shellQuote("it's")).toBe("'it'\\''s'");
+    expect(shellQuote("")).toBe("''");
+  });
+});
+
+describe("fetchProviders", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("reads the provider list the server serves", async () => {
+    const providers = [{ id: "codex", label: "Codex", advanced_fields: [] }];
+    const fetch = respond(200, { providers });
+    await expect(fetchProviders()).resolves.toEqual(providers);
+    expect(fetch).toHaveBeenCalledWith("/gateway/management/providers", expect.anything());
+  });
+});
+
+describe("providerLabel", () => {
+  it("is the listed label, else the id", () => {
+    const providers = [{ id: "codex", label: "Codex", advanced_fields: [] }];
+    expect(providerLabel(providers, "codex")).toBe("Codex");
+    expect(providerLabel(providers, "newcli")).toBe("newcli");
   });
 });

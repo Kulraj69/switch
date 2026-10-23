@@ -26,6 +26,7 @@ import { cn } from '@renderer/utils/utils';
 import type { Agent } from '@shared/core/agents/agents';
 import { AgentStatusSlot } from './agent-status-slot';
 import { DiscoveryFailureIndicator } from './discovery-failure-indicator';
+import { MigrationProblemIndicator } from './migration-problem-indicator';
 import { SidebarItemMiniButton, SidebarMenuAction, SidebarMenuRow } from './sidebar-primitives';
 import { depthIndent, roomAgentGroupKey } from './sidebar-store';
 
@@ -118,6 +119,7 @@ export const RoomAgentRow = observer(function RoomAgentRow({
               <AgentAvatar
                 name={label}
                 iconUrl={iconUrl}
+                serverId={agent.serverId}
                 size={21}
                 className="-mx-[1.5px] bg-transparent"
               />
@@ -147,6 +149,7 @@ export const RoomAgentRow = observer(function RoomAgentRow({
                   />
                   <AgentConnectionIndicator agent={agent} />
                   <DiscoveryFailureIndicator agentId={agent.id} label={label} />
+                  <MigrationProblemIndicator agentId={agent.id} label={label} />
                   {agent.providerId && (
                     <ProviderIssueIndicator
                       providerId={agent.providerId}

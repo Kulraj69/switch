@@ -14,6 +14,7 @@ import {
 } from './controller-files';
 import {
   type ControllerBackoff,
+  type ControllerFinalExit,
   type ControllerLaunch,
   type ControllerLogLevel,
   ControllerSupervisor,
@@ -87,16 +88,31 @@ export type EmbeddedControllerDeps = {
   stopTimeoutMs: number;
   /** The Console agents moved onto this computer's controller for the server, by name. */
   movedAgents: (serverId: string) => Promise<string[]>;
+  /** Provider checks made ahead of the controller, for it to take, or null when there are none. */
+  providerSeed: () => string | null;
 };
 
-export const WINDOWS_UNSUPPORTED =
-  'Managed agents run through the shared host, which needs macOS or Linux. This computer runs Windows.';
+const SUPPORTED_PLATFORMS: readonly NodeJS.Platform[] = ['darwin', 'linux', 'win32'];
+
+/** Every provider's sign-in check runs at once; the slowest allows itself 15 seconds. */
+const RECHECK_TIMEOUT_MS = 60_000;
+
+function providerSeedArgs(file: string | null): string[] {
+  return file === null ? [] : ['--provider-seed', file];
+}
+
+/** Why managed agents cannot run on `platform`, or null when they can. */
+export function unsupportedPlatformReason(platform: NodeJS.Platform): string | null {
+  return SUPPORTED_PLATFORMS.includes(platform)
+    ? null
+    : `Managed agents run on macOS, Linux and Windows. This computer runs ${platform}.`;
+}
 
 type Runner = { supervisor: ControllerSupervisor; phase: EmbeddedControllerPhase };
 
 /**
  * "Run managed agents on this computer", per signed-in Switch server: enrolls
- * this Console as an agents controller of kind `console`, keeps its credential
+ * this Console as an agent controller of kind `console`, keeps its credential
  * in the encrypted secrets store, and runs the agent-controller CLI as a
  * child process for as long as it is on.
  *
@@ -114,7 +130,7 @@ export class EmbeddedControllerService {
   constructor(private readonly deps: EmbeddedControllerDeps) {}
 
   get unsupportedReason(): string | null {
-    return this.deps.platform === 'win32' ? WINDOWS_UNSUPPORTED : null;
+    return unsupportedPlatformReason(this.deps.platform);
   }
 
   /** Starts the controller of every server this Console is enrolled with. */
@@ -191,6 +207,18 @@ export class EmbeddedControllerService {
     return record?.kind === 'enrolled' ? record.controllerId : null;
   }
 
+  /**
+   * The servers this computer runs a controller for now: enrolled, and its
+   * controller started in this session. Only these can have a fresh report of
+   * this computer's providers on the server.
+   */
+  async runningServerIds(): Promise<string[]> {
+    const records = await this.deps.records.all();
+    return Object.entries(records)
+      .filter(([serverId, record]) => record.kind === 'enrolled' && this.runners.has(serverId))
+      .map(([serverId]) => serverId);
+  }
+
   /** Turns it on: enrolls through the signed-in session of `workspaceId`, then starts the controller. */
   async enable(serverId: string, workspaceId: string): Promise<void> {
     if (this.unsupportedReason) throw new Error(this.unsupportedReason);
@@ -230,7 +258,7 @@ export class EmbeddedControllerService {
           await this.revokeQuietly(workspaceId, enrolled.controllerId);
           throw error;
         }
-        this.deps.log.info('Enrolled this computer as an agents controller', {
+        this.deps.log.info('Enrolled this computer as an agent controller', {
           serverId,
           controllerId: enrolled.controllerId,
         });
@@ -241,6 +269,17 @@ export class EmbeddedControllerService {
       this.phases.delete(serverId);
       this.startRunner(serverId);
     });
+  }
+
+  /**
+   * Has this computer's controller for `serverId` check every provider again
+   * now and report it, after the user installed or signed in to one. Resolves
+   * once Switch holds the fresh report.
+   */
+  async recheckProviders(serverId: string): Promise<void> {
+    const runner = this.runners.get(serverId);
+    if (!runner) throw new Error('This computer does not run managed agents for this server.');
+    await runner.supervisor.recheckProviders(RECHECK_TIMEOUT_MS);
   }
 
   /**
@@ -255,7 +294,7 @@ export class EmbeddedControllerService {
     const moved = await this.deps.movedAgents(serverId);
     if (moved.length)
       throw new MovedAgentsHereError(
-        `This computer runs ${moved.join(', ')} for this Console. Bring them back with Stop managing (or Bring all back) before turning it off.`,
+        `This computer runs ${moved.join(', ')} as managed agents for this Console. Delete those agents before turning it off.`,
         moved
       );
     await this.turnOff(serverId);
@@ -287,6 +326,42 @@ export class EmbeddedControllerService {
         serverId,
       });
     });
+  }
+
+  /**
+   * Enrolls this computer afresh when the server no longer knows the machine
+   * it was enrolled as: its database was reset or restored, say. The old
+   * controller is stopped and its identity forgotten (there is nothing on the
+   * server to revoke), then this computer enrolls again in the same
+   * workspace. Refused while the server still lists the machine, which is
+   * turned off and on instead.
+   */
+  async enrollAgain(serverId: string): Promise<void> {
+    const record = await this.deps.records.get(serverId);
+    if (record?.kind !== 'enrolled')
+      throw new Error('This computer is not enrolled to run managed agents for this server.');
+    const remote = await this.deps.management.read(record.workspaceId, record.controllerId);
+    if (remote.kind !== 'ok')
+      throw new Error(
+        remote.kind === 'error'
+          ? `Switch could not be asked about this computer: ${remote.message}`
+          : 'This server no longer has agent management turned on.'
+      );
+    if (remote.controller && remote.controller.state !== 'revoked')
+      throw new Error(
+        'Switch still lists this computer as a machine. Turn it off and on again instead.'
+      );
+    await this.exclusive(serverId, async () => {
+      const runner = this.runners.get(serverId);
+      this.runners.delete(serverId);
+      if (runner) await runner.supervisor.stop(this.deps.stopTimeoutMs);
+      await this.forget(serverId);
+      this.deps.log.warn('The server no longer knew this computer as a machine; enrolling again', {
+        serverId,
+        controllerId: record.controllerId,
+      });
+    });
+    await this.enable(serverId, record.workspaceId);
   }
 
   /**
@@ -422,6 +497,7 @@ export class EmbeddedControllerService {
         '--credential-stdin',
         '--shared-host-bundle',
         this.deps.bundles.sharedHost(),
+        ...providerSeedArgs(this.deps.providerSeed()),
       ],
       env: {
         ...this.deps.env(),
@@ -459,7 +535,18 @@ export class EmbeddedControllerService {
     return moved;
   }
 
-  private async onFinal(serverId: string, exit: 'revoked' | 'taken_over'): Promise<void> {
+  private async onFinal(serverId: string, exit: ControllerFinalExit): Promise<void> {
+    if (exit === 'upgrade_required') {
+      this.deps.log.error(
+        'Switch needs a newer agent controller than this Console carries; not restarting it until Console is updated',
+        { serverId }
+      );
+      this.setRunnerPhase(serverId, {
+        kind: 'update_required',
+        at: new Date(this.deps.now()).toISOString(),
+      });
+      return;
+    }
     if (exit === 'taken_over') {
       this.deps.log.error(
         'Another copy of this computer’s controller connected to Switch and took over; not restarting it',
@@ -474,9 +561,12 @@ export class EmbeddedControllerService {
     if (this.busy.has(serverId)) return;
     const record = await this.deps.records.get(serverId);
     const at = new Date(this.deps.now()).toISOString();
-    this.deps.log.warn('Switch removed this computer as a machine; forgetting its credential', {
-      serverId,
-    });
+    this.deps.log.warn(
+      exit === 'credential_invalid'
+        ? 'Switch no longer knows this computer’s controller credential; forgetting it'
+        : 'Switch removed this computer as a machine; forgetting its credential',
+      { serverId }
+    );
     this.runners.delete(serverId);
     try {
       await this.deps.secrets.deleteSecret(credentialSecretKey(serverId));

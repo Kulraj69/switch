@@ -34,7 +34,6 @@ a wait gets exactly that wait.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import secrets
 from collections import OrderedDict
@@ -69,6 +68,10 @@ from switch_core.db.models import (
     TurnStatusPost,
 )
 from switch_core.db.session_scope import tenant_session
+from switch_core.db.stores.agent_store import AgentStore
+from switch_core.db.stores.client_store import ClientStore
+from switch_core.db.stores.external_user_store import ExternalUserStore
+from switch_core.db.stores.room_role_store import RoomRoleStore
 from switch_core.db.stores.room_store import RoomStore
 from switch_core.db.stores.session_activity_post_store import (
     ApprovalRequestPostStore,
@@ -79,7 +82,7 @@ from switch_core.db.stores.session_activity_store import (
     AgentSessionActivityStore,
     ApprovalRequestStore,
 )
-from switch_core.deeplinks import deeplink_for_platform
+from switch_core.delivery.addressing import AddressingResolver
 from switch_core.session_activity.bridge_turns import (
     TurnView,
     status_state,
@@ -95,7 +98,7 @@ from switch_core.sessions.contract import DecidedBy, decided
 from switch_core.sessions.presentation import (
     activity_error_summary,
     notification_recipient,
-    session_console_url,
+    request_card_recipient,
 )
 
 logger = logging.getLogger(__name__)
@@ -203,7 +206,6 @@ class AgentSessionActivityPublisher:
         listener: AgentSessionActivityListener,
         session_factory: async_sessionmaker[AsyncSession],
         agent_online: Callable[[str], bool],
-        gateway_public_url: str | None,
     ) -> None:
         self._adapter = adapter
         self._bridge_id = bridge_id
@@ -212,9 +214,17 @@ class AgentSessionActivityPublisher:
         self._listener = listener
         self._sessions = session_factory
         self._agent_online = agent_online
-        self._gateway_public_url = gateway_public_url
         self._approvals = ApprovalRequestStore()
         self._rooms = RoomStore()
+        self._addressing = AddressingResolver(
+            room_store=self._rooms,
+            room_role_store=RoomRoleStore(),
+            client_store=ClientStore(),
+            agent_store=AgentStore(),
+            external_user_store=ExternalUserStore(),
+            # Only role mentions consult liveness; a permission check never does.
+            live_connection_ids=set,
+        )
         self._activity = AgentSessionActivityStore()
         self._card_posts = ApprovalRequestPostStore()
         self._turn_posts = TurnStatusPostStore()
@@ -257,12 +267,20 @@ class AgentSessionActivityPublisher:
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None
-        for task in self._tasks:
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
             task.cancel()
-        for task in self._tasks:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-        self._tasks = []
+        # A task that had already died is logged rather than raised: the
+        # bridge stopping this publisher goes on to close its platform
+        # connection, and a second stop has nothing left to raise.
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for task, result in zip(tasks, results, strict=True):
+            if isinstance(result, Exception):
+                logger.error(
+                    "Session activity task %s had stopped on an error",
+                    task.get_name(),
+                    exc_info=result,
+                )
 
     # ── Listener callbacks: queue only ────────────────────────────────────────
 
@@ -325,10 +343,9 @@ class AgentSessionActivityPublisher:
             clock = self._adapter.redraws_for_elapsed_time
             for keys in (self._live_turns, self._open_cards):
                 for key, agent_id in list(keys.items()):
-                    moved = self._online_seen.get(agent_id) != self._agent_online(
-                        agent_id
-                    )
-                    if moved or (clock and keys is self._live_turns):
+                    online = self._agent_online(agent_id)
+                    moved = self._online_seen.get(agent_id) != online
+                    if moved or (clock and online and keys is self._live_turns):
                         self._enqueue(key)
 
     async def _handle(self, key: _Key) -> None:
@@ -496,15 +513,6 @@ class AgentSessionActivityPublisher:
         )
         return None
 
-    def _session_url(self, agent_id: str, room_id: str, session_id: str) -> str | None:
-        return deeplink_for_platform(
-            session_console_url(
-                self._gateway_public_url, agent_id, room_id, session_id
-            ),
-            self._gateway_public_url,
-            self._adapter.renders_custom_url_schemes,
-        )
-
     async def _recipient(
         self,
         db: AsyncSession,
@@ -514,22 +522,55 @@ class AgentSessionActivityPublisher:
         thread_ref: str | None,
     ) -> str | None:
         """Who a post asking someone to act names: whoever asked, else the owner."""
-        actor_id: str | None = None
-        if turn_row is not None and turn_row.message_id is not None:
-            actor_id = await db.scalar(
-                select(Message.sender_id).where(
-                    Message.transport_event_id == turn_row.message_id
-                )
-            )
         return await notification_recipient(
             db,
             bridge_id=self._bridge_id,
             room_id=room_id,
             surface=self._bridge_type,
-            actor_id=actor_id,
+            actor_id=await self._asker(db, turn_row),
             agent=agent,
             thread_id=thread_ref,
         )
+
+    async def _card_recipient(
+        self,
+        db: AsyncSession,
+        room_id: str,
+        agent: Agent,
+        turn_row: AgentSessionActivityItem | None,
+        thread_ref: str | None,
+    ) -> str | None:
+        """Who a new request card names: in a thread, somebody who may answer it."""
+        if thread_ref is None:
+            return await self._recipient(db, room_id, agent, turn_row, None)
+
+        async def may_answer(sender: str) -> bool:
+            decision = await self._addressing.permitted(
+                db, agent=agent, room_id=room_id, sender=sender
+            )
+            return decision.allowed
+
+        return await request_card_recipient(
+            db,
+            bridge_id=self._bridge_id,
+            room_id=room_id,
+            actor_id=await self._asker(db, turn_row),
+            agent=agent,
+            may_answer=may_answer,
+        )
+
+    async def _asker(
+        self, db: AsyncSession, turn_row: AgentSessionActivityItem | None
+    ) -> str | None:
+        """The room identity of whoever sent the message a turn answers, if known."""
+        if turn_row is None or turn_row.message_id is None:
+            return None
+        sender: str | None = await db.scalar(
+            select(Message.sender_id).where(
+                Message.transport_event_id == turn_row.message_id
+            )
+        )
+        return sender
 
     async def _turn_row(
         self, db: AsyncSession, agent_id: str, session_id: str, turn_id: str
@@ -568,13 +609,12 @@ class AgentSessionActivityPublisher:
             online = self._agent_online(agent_id)
             asking = post is None and row.state == "open"
             recipient = (
-                await self._recipient(
+                await self._card_recipient(
                     db, row.room_id, target.agent, turn_row, target.thread_ref
                 )
                 if asking
                 else None
             )
-            session_url = self._session_url(agent_id, row.room_id, session_id)
             db.expunge_all()
         self._online_seen[agent_id] = online
         if row.state == "open":
@@ -595,7 +635,7 @@ class AgentSessionActivityPublisher:
             self._retries.clear(key)
             return
         if post.external_post_id is None:
-            recovered = await self._unconfirmed(key, post, session_url)
+            recovered = await self._unconfirmed(key, post)
             if recovered is None:
                 return
             post = recovered
@@ -853,14 +893,14 @@ class AgentSessionActivityPublisher:
                 await db.delete(stored)
 
     async def _unconfirmed(
-        self, key: _Key, post: ApprovalRequestPost, session_url: str | None
+        self, key: _Key, post: ApprovalRequestPost
     ) -> ApprovalRequestPost | None:
         """A card whose post was never confirmed: find it, or say so; never repost."""
         if post.unconfirmed_notice_at is not None:
             return None
         if not self._adapter.recovers_uncertain_posts:
             if self._adapter.discloses_unconfirmed_posts:
-                await self._disclose_unconfirmed(post, session_url)
+                await self._disclose_unconfirmed(post)
             elif post.token not in self._noted_unconfirmed:
                 self._noted_unconfirmed.add(post.token)
                 logger.error(
@@ -910,9 +950,7 @@ class AgentSessionActivityPublisher:
         post.external_post_id = ref
         return post
 
-    async def _disclose_unconfirmed(
-        self, post: ApprovalRequestPost, session_url: str | None
-    ) -> None:
+    async def _disclose_unconfirmed(self, post: ApprovalRequestPost) -> None:
         """Say once in the channel that this card cannot be answered there.
 
         The row is stamped before the message is sent: a second notice would
@@ -931,14 +969,11 @@ class AgentSessionActivityPublisher:
             if stored is None or stored.unconfirmed_notice_at is not None:
                 return
             stored.unconfirmed_notice_at = datetime.now(UTC)
-        console = (
-            f"[Switch Console]({session_url})" if session_url else "Switch Console"
-        )
         sent = await self._adapter.admin_message(
             post.external_channel_id,
             f"Switch could not confirm that request **{post.handle}** reached "
             "this chat. If a card for it is here, answering it here will not "
-            f"work — answer it in {console} instead.",
+            "work — answer it in Switch Console instead.",
             post.thread_ref,
         )
         if sent is None:
@@ -993,7 +1028,6 @@ class AgentSessionActivityPublisher:
             )
             db.expunge_all()
         self._online_seen[agent_id] = online
-        session_url = self._session_url(agent_id, room_id, session_id)
         interrupt_turn_id = None if view.ended else running
         elapsed = view.elapsed_seconds(now)
         drawn = self._remembered(key)
@@ -1002,14 +1036,12 @@ class AgentSessionActivityPublisher:
             view.items,
             view.turn,
             elapsed,
-            session_url=session_url,
             interrupt_turn_id=interrupt_turn_id,
         )
         state = status_state(
             view,
             elapsed_seconds=elapsed,
             interrupt_turn_id=interrupt_turn_id,
-            session_url=session_url,
             clock_redraws=self._adapter.redraws_for_elapsed_time,
         )
         if post is None:
@@ -1021,9 +1053,7 @@ class AgentSessionActivityPublisher:
             await self._redraw_turn(key, post, view, target, content, state, drawn)
         if post is not None:
             await self._marks(key, post, view, target, waiting_behind=bool(unended))
-            await self._attention(
-                post, view, target, error_summary, recipient, session_url, drawn
-            )
+            await self._attention(post, view, target, error_summary, recipient, drawn)
         if post is not None and not view.ended:
             self._live_turns[key] = agent_id
         else:
@@ -1351,20 +1381,17 @@ class AgentSessionActivityPublisher:
         target: _Target,
         error_summary: str | None,
         recipient: str | None,
-        session_url: str | None,
         drawn: _TurnDrawn,
     ) -> None:
         """One message per turn saying somebody has to act, cleared once nobody does.
 
         Posted, not edited in, because a post notifies and an edit does not.
-        Carries the session's link, the way from the message a reader is asked
-        to act on to what the turn was doing.
         """
         if not self._adapter.separate_attention_slot:
             return
         if error_summary is None and post.attention_post_id is None:
             return
-        state = f"{session_url or ''}\n{error_summary or view.turn.status}"
+        state = error_summary or view.turn.status
         if post.attention_post_id is not None and drawn.attention_state == state:
             return
         content = TurnActivity(
@@ -1375,7 +1402,6 @@ class AgentSessionActivityPublisher:
             and recipient is None
             and self._adapter.notifies_only_by_mention,
             error_summary=error_summary,
-            session_url=session_url,
         )
         try:
             if post.attention_post_id is None:
@@ -1434,15 +1460,11 @@ class AgentSessionActivityPublisher:
             if found is None:
                 return None
             view, _ = found
-            assert view.row.room_id is not None
             now: datetime = (await db.execute(select(func.now()))).scalar_one()
         return ActivitySnapshot(
             items=view.items,
             turn=view.turn,
             elapsed_seconds=view.elapsed_seconds(now),
-            session_url=self._session_url(
-                view.row.agent_id, view.row.room_id, view.row.session_id
-            ),
             read_at=now,
         )
 
