@@ -95,6 +95,7 @@ from switch_core.bridges.agent.protocol.agent_connections import (
     UnfencedControlError,
     UnknownConnectionError,
     evicted_session_warning,
+    sse_fallback,
 )
 from switch_core.bridges.agent.protocol.agent_core import AgentCore, AgentExistsError
 from switch_core.bridges.agent.protocol.event_buffer import TICKET_FLOOR, Reader
@@ -720,6 +721,8 @@ async def poll_events(
     client: Annotated[str | None, Query()] = None,
     client_version: Annotated[str | None, Query()] = None,
     rooms: Annotated[str | None, Query()] = None,
+    fallback: Annotated[str | None, Query()] = None,
+    fallback_close_code: Annotated[str | None, Query()] = None,
     last_event_id: Annotated[str | None, Header(alias="last-event-id")] = None,
 ) -> EventResponse | Response:
     """Deliver the agent's events, as a push stream or a long poll.
@@ -734,6 +737,8 @@ async def poll_events(
 
     The declaration parameters are all optional and all default to None,
     meaning *unknown* (CHOO-1865): a client that says nothing still connects.
+    `fallback` (and `fallback_close_code`) come from a runtime that has the
+    WebSocket but whose socket never opened, and only reach the log line.
     """
     if accept and "text/event-stream" in accept:
         return await _open_event_stream(
@@ -751,6 +756,7 @@ async def poll_events(
                 accepts=protocol_accepts,
                 artifact=client,
                 version=client_version,
+                fallback=sse_fallback(fallback, fallback_close_code),
             ),
             rooms=rooms,
             last_event_id=last_event_id,
