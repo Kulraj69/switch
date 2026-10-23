@@ -4,8 +4,8 @@ Each time the bridge starts it creates a personal-access token for every bot.
 Without revocation those tokens pile up indefinitely. Two properties are tested:
 
 1. stop() revokes every token minted by this process.
-2. Before minting a new token the bridge revokes any existing Switch tokens that
-   were left by an earlier process (e.g. after a crash that skipped stop()).
+2. After minting a new token the bridge revokes every other Switch token on the
+   bot, left by an earlier process (e.g. after a crash that skipped stop()).
 """
 
 from __future__ import annotations
@@ -45,8 +45,9 @@ class _TokenAwareAdmin:
     and lets the test seed pre-existing stale tokens for a bot."""
 
     def __init__(self, stale_tokens_by_bot: dict[str, list[dict[str, Any]]]) -> None:
-        self._stale_tokens = stale_tokens_by_bot
+        self._tokens = stale_tokens_by_bot
         self.revoked: list[str] = []
+        self.token_pages: list[str] = []
         self._token_seq = 0
         self.client = SimpleNamespace(make_request=self._make_request)
         self.teams = SimpleNamespace(add_user_to_team=lambda team_id, body: None)
@@ -72,12 +73,28 @@ class _TokenAwareAdmin:
             return {"user_id": f"bot-{options['username']}"}
         if method == "put" and endpoint.startswith("/bots/"):
             return {}
-        if method == "post" and "/tokens" in endpoint and endpoint != "/users/tokens/revoke":
+        if (
+            method == "post"
+            and "/tokens" in endpoint
+            and endpoint != "/users/tokens/revoke"
+        ):
+            assert options is not None
             self._token_seq += 1
-            return {"token": f"secret-{self._token_seq}", "id": f"tok-{self._token_seq}"}
-        if method == "get" and "/tokens" in endpoint:
             bot_id = endpoint.split("/users/")[1].split("/tokens")[0]
-            return self._stale_tokens.get(bot_id, [])
+            token_id = f"tok-{self._token_seq}"
+            self._tokens.setdefault(bot_id, []).append(
+                {"id": token_id, "description": options["description"]}
+            )
+            return {"token": f"secret-{self._token_seq}", "id": token_id}
+        if method == "get" and "/tokens?" in endpoint:
+            bot_id = endpoint.split("/users/")[1].split("/tokens")[0]
+            query = dict(
+                part.split("=") for part in endpoint.split("?", 1)[1].split("&")
+            )
+            page, per_page = int(query["page"]), int(query["per_page"])
+            self.token_pages.append(endpoint)
+            tokens = self._tokens.get(bot_id, [])
+            return tokens[page * per_page : (page + 1) * per_page]
         if method == "post" and endpoint == "/users/tokens/revoke":
             assert options is not None
             self.revoked.append(str(options["token_id"]))
@@ -133,8 +150,7 @@ def test_stop_revokes_agent_bot_token() -> None:
 
     _run(go())
 
-    assert adapter._bot_token_ids == {}
-    assert len(admin.revoked) == 1
+    assert admin.revoked == ["tok-1"]
 
 
 def test_stop_revokes_tokens_for_all_agent_bots() -> None:
@@ -148,8 +164,7 @@ def test_stop_revokes_tokens_for_all_agent_bots() -> None:
 
     _run(go())
 
-    assert adapter._bot_token_ids == {}
-    assert len(admin.revoked) == 2
+    assert sorted(admin.revoked) == ["tok-1", "tok-2"]
 
 
 def test_remove_agent_identity_revokes_its_token() -> None:
@@ -163,15 +178,13 @@ def test_remove_agent_identity_revokes_its_token() -> None:
 
     _run(go())
 
-    assert "switchdev" not in adapter._bot_token_ids
-    assert "worker" in adapter._bot_token_ids
-    assert len(admin.revoked) == 1
+    assert admin.revoked == ["tok-1"]
 
 
 # ── revoke stale tokens on start ─────────────────────────────────────────────
 
 
-def test_stale_switch_tokens_are_revoked_before_creating_a_new_one() -> None:
+def test_stale_switch_tokens_are_revoked_but_the_new_one_kept() -> None:
     stale = [
         {"id": "old-tok-1", "description": "Switch bridge token for switchdev"},
         {"id": "old-tok-2", "description": "Switch bridge token for switchdev"},
@@ -184,8 +197,8 @@ def test_stale_switch_tokens_are_revoked_before_creating_a_new_one() -> None:
 
     _run(go())
 
-    assert "old-tok-1" in admin.revoked
-    assert "old-tok-2" in admin.revoked
+    assert sorted(admin.revoked) == ["old-tok-1", "old-tok-2"]
+    assert adapter._agent_bots["switchdev"]["token_id"] == "tok-1"
 
 
 def test_non_switch_tokens_are_not_revoked_on_start() -> None:
@@ -205,7 +218,7 @@ def test_non_switch_tokens_are_not_revoked_on_start() -> None:
     assert "old-tok-1" in admin.revoked
 
 
-def test_no_stale_tokens_means_no_revocations_before_create() -> None:
+def test_no_stale_tokens_means_no_revocations() -> None:
     adapter, admin = _adapter()
 
     async def go() -> None:
@@ -215,3 +228,55 @@ def test_no_stale_tokens_means_no_revocations_before_create() -> None:
     _run(go())
 
     assert admin.revoked == []
+
+
+def test_stale_tokens_are_found_past_the_first_page() -> None:
+    stale = [
+        {"id": f"old-tok-{n}", "description": "Switch bridge token for switchdev"}
+        for n in range(250)
+    ]
+    adapter, admin = _adapter(stale_tokens_by_bot={"bot-switchdev": stale})
+
+    async def go() -> None:
+        adapter._main_loop = asyncio.get_running_loop()
+        await adapter.create_agent_identity(_SWITCHDEV)
+
+    _run(go())
+
+    assert len(admin.token_pages) == 2
+    assert sorted(admin.revoked) == sorted(f"old-tok-{n}" for n in range(250))
+
+
+def test_admin_bot_keeps_only_its_new_token() -> None:
+    stale = [{"id": "old-admin-tok", "description": "Switch admin bot token"}]
+    adapter, admin = _adapter(stale_tokens_by_bot={"bot-switch-admin": stale})
+
+    async def go() -> None:
+        adapter._main_loop = asyncio.get_running_loop()
+        await adapter._ensure_admin_bot()
+        assert admin.revoked == ["old-admin-tok"]
+        await adapter.stop()
+
+    _run(go())
+
+    assert admin.revoked == ["old-admin-tok", "tok-1"]
+
+
+def test_a_renamed_agent_still_has_its_token_revoked_on_removal() -> None:
+    adapter, admin = _adapter()
+    renamed = AgentIdentity(
+        agent_id="agent-1",
+        name="switchdev2",
+        description="a Switch agent",
+        display_name=None,
+    )
+
+    async def go() -> None:
+        adapter._main_loop = asyncio.get_running_loop()
+        await adapter.create_agent_identity(_SWITCHDEV)
+        await adapter.rename_agent_identity("switchdev", renamed)
+        await adapter.remove_agent_identity(renamed)
+
+    _run(go())
+
+    assert admin.revoked == ["tok-1"]
