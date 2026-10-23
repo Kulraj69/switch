@@ -841,6 +841,21 @@ class TestCheckAndImpact:
         assert checked.json()["ok"] is False
         assert len(await _audit(session_factory)) == 1
 
+    async def test_a_passing_google_check_says_it_cannot_see_the_redirect(
+        self, world: World, operator
+    ) -> None:
+        await world.install()
+        async with world.harness.client() as client:
+            cookies = cookies_for(operator)
+            await client.put(f"{APPS}/{GOOGLE}", json=_google_body(), cookies=cookies)
+            checked = await client.post(f"{APPS}/{GOOGLE}/check", cookies=cookies)
+        [check] = checked.json()["checks"]
+        assert check["ok"] is True
+        assert check["message"] == "Google Workspace accepts this client ID and secret."
+        assert check["note"] == (
+            "Switch can't check the redirect URI. Connect once to confirm."
+        )
+
     async def test_the_impact_counts_people_across_workspaces(
         self, world: World, operator, session_factory
     ) -> None:

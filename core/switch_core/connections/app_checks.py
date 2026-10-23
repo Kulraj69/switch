@@ -12,9 +12,10 @@ request it must refuse, and reads which refusal it chose.
   redirect URI the client registers: Core's own callback, or Switch
   Console's first loopback one for a client that has no other. `invalid_grant` means the client id and
   secret are right; `invalid_client` that they are not; and
-  `redirect_uri_mismatch` that the redirect URI is not registered. What the
-  vendor does not show this way (Airtable compares redirect URIs only with a
-  real code, and says nothing of whether the integration is published) is the
+  `redirect_uri_mismatch`, from a vendor that compares it first, that the
+  redirect URI is not registered. What the vendor does not show this way
+  (Google and Airtable compare the redirect URI only with a real code, and
+  Airtable says nothing of whether the integration is published) is the
   entry's `unchecked`, said with the result.
 
 What a check cannot prove (an App's permissions, a Google app's user type,

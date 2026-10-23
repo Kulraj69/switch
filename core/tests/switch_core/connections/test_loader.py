@@ -65,6 +65,8 @@ def test_the_shipped_google_entry_signs_in_and_runs_gws_as_the_spike_found_it_mu
     assert oauth.authorization_params == {"access_type": "offline"}
     assert oauth.prompt == "consent select_account"
     assert oauth.revocation_url == "https://oauth2.googleapis.com/revoke"
+    # Google refuses a made-up code before comparing the redirect URI.
+    assert oauth.unchecked is not None and "redirect URI" in oauth.unchecked
     assert definition.auth.refresh == "reusable"
     assert definition.auth.identity is not None
     assert (definition.auth.identity.account_id, definition.auth.identity.label) == (
