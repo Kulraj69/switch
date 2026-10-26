@@ -770,8 +770,8 @@ class AgentConnectionRegistry:
                 scope,
                 existing.stream_generation,
                 transport,
-                _fallback_suffix(declaration),
                 f" from process={moved_from}" if moved_from is not None else "",
+                _fallback_suffix(declaration),
             )
             return existing
 
