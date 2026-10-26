@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
 from starlette.websockets import WebSocketDisconnect
 
 from switch_core.gateway import changes
@@ -125,22 +126,22 @@ def test_a_client_that_answers_pings_stays(
             ws.send_json({"type": "pong"})
 
 
-def test_a_refused_socket_says_why_and_closes(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
+def test_a_caller_without_a_session_gets_a_401_and_no_socket(
+    client: TestClient, feed: LocalUserChanges, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Refused in the handshake, as any gateway route refuses: nothing is
+    accepted or held for a caller who is not signed in."""
+
     async def _refuse(*_: Any) -> SocketCaller:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
     monkeypatch.setattr(changes, "authenticate_socket", _refuse)
-    with client.websocket_connect("/changes/ws") as ws:
-        refused = ws.receive_json()
-        with pytest.raises(WebSocketDisconnect) as closed:
-            ws.receive_json()
-    assert refused == {
-        "event": "refused",
-        "data": {"status": 401, "detail": "Not authenticated"},
-    }
-    assert closed.value.code == 4401
+    with pytest.raises(WebSocketDenialResponse) as denied:
+        with client.websocket_connect("/changes/ws"):
+            pass
+    assert denied.value.status_code == 401
+    assert denied.value.json() == {"detail": "Not authenticated"}
+    assert feed.subscriber_count("t1", "ada") == 0
 
 
 def test_closes_with_4401_when_the_session_cookie_expires(

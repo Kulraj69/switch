@@ -14,17 +14,20 @@ JSON `{"event", "data"}`, as on the agent and controller sockets:
   socket is closed. A client that hears no ping for as long should assume the
   same of the server and reconnect.
 
-Authenticated once, when the socket opens, by the same session cookie and
-tenant resolution as every gateway route (`authenticate_socket`); a refusal is
-a `refused` frame with the status and detail, then close code 4000 plus the
-status, like the agent socket. The socket holds no database connection while
-it is open. It is closed with 4401 when the cookie it was opened with
-expires, so a client reconnects with the cookie it has renewed since.
+Authenticated once, during the handshake, by the same session cookie and
+tenant resolution as every gateway route (`authenticate_socket`). A caller
+without a valid session gets the HTTP 401 any gateway route answers and no
+socket: nothing is accepted, held or sent for it. Console treats that like any
+socket that would not open, and its next read of a list (which still polls
+every few minutes) gets the same 401 and asks the user to sign in again. The
+socket holds no database connection while it is open. It is closed with 4401
+when the cookie it was opened with expires, so a client reconnects with the
+cookie it has renewed since.
 
 A user holds at most `MAX_SOCKETS_PER_USER` of these at once. Console opens
 one per server, so the cap only meets a client opening sockets in a loop, which
 would otherwise hold a file handle and a subscription per socket. Past it the
-socket is refused with 429 (close 4429), and Console backs off and keeps
+socket is refused with a `refused` frame and close 4429, and Console backs off and keeps
 polling, so a refused socket costs a delay, never a stale list.
 
 A client reads everything again each time the socket opens, so a notice lost
@@ -38,12 +41,12 @@ import logging
 import time
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from switch_core.config import SwitchConfig
 from switch_core.db.stores.user_store import UserStore
-from switch_core.gateway.auth import authenticate_socket
+from switch_core.gateway.auth import SocketCaller, authenticate_socket
 from switch_core.gateway.dependencies import (
     get_config,
     get_session_factory,
@@ -67,25 +70,30 @@ _EXPIRED = 4401
 MAX_SOCKETS_PER_USER = 16
 
 
-@router.websocket("/changes/ws")
-async def changes_socket(
+async def get_socket_caller(
     websocket: WebSocket,
     session_factory: Annotated[
         async_sessionmaker[AsyncSession], Depends(get_session_factory)
     ],
     user_store: Annotated[UserStore, Depends(get_user_store)],
     config: Annotated[SwitchConfig, Depends(get_config)],
+) -> SocketCaller:
+    """The signed-in caller, checked before the socket is accepted.
+
+    A dependency rather than a call in the handler, so its `HTTPException`
+    reaches the client as the handshake's HTTP response (Starlette's denial
+    response) instead of a frame on a socket that was accepted for nothing.
+    """
+    return await authenticate_socket(websocket, session_factory, user_store, config)
+
+
+@router.websocket("/changes/ws")
+async def changes_socket(
+    websocket: WebSocket,
+    caller: Annotated[SocketCaller, Depends(get_socket_caller)],
     changes: Annotated[LocalUserChanges, Depends(get_user_changes)],
 ) -> None:
     await websocket.accept()
-    try:
-        caller = await authenticate_socket(
-            websocket, session_factory, user_store, config
-        )
-    except HTTPException as exc:
-        await _refuse(websocket, exc.status_code, exc.detail)
-        return
-
     # No await between the count and the subscribe, so two sockets opening at
     # once cannot both slip under the cap.
     if (
