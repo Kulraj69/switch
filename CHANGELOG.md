@@ -156,7 +156,9 @@ version of their own to them without also giving them a release of their own.
   instead of 403, and so did looking up a room the agent is not in. A room
   history request whose `since` or `before` is not an ISO 8601 timestamp
   answered 500 instead of 400; it now says which parameter was wrong, and so
-  does `read_context` (#1045).
+  does `read_context` (#1045). One whose offset moves it outside the years 1
+  to 9999 in UTC is refused the same way instead of answering 404, and a time
+  in the last millisecond of 9999 is no longer refused at all.
 - **Full garbage collections no longer stall the server for hundreds of
   milliseconds.** Once boot has built what lasts for the life of the process
   (modules, the ORM's mappers, the app's routes), the server freezes it out of
