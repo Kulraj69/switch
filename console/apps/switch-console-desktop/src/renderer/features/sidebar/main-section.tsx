@@ -1,6 +1,6 @@
 import { DoorOpen, MessageCircle, X } from 'lucide-react';
 import { observer } from 'mobx-react-lite';
-import { useState } from 'react';
+import { type HTMLAttributes, type Ref, useState } from 'react';
 import { ManagedAgentList } from '@renderer/features/managed-agents/managed-agent-list';
 import { useManagedAgents } from '@renderer/features/managed-agents/use-managed-agents';
 import { BuddyAvatar } from '@renderer/features/switch-buddy/buddy-avatar';
@@ -128,15 +128,19 @@ export function RoomListRow({
   isActive,
   onOpen,
   mark = null,
+  ...rest
 }: {
   room: Pick<RemoteRoomSummary, 'name' | 'bridgeType' | 'bridgeDisplayName'>;
   isActive: boolean;
   onOpen: () => void;
   /** A short word after the name, such as how the room shares a session. */
   mark?: string | null;
-}) {
+  /** Passed to the row, so a menu trigger can be laid over it (`asChild`). */
+  ref?: Ref<HTMLDivElement>;
+} & Omit<HTMLAttributes<HTMLDivElement>, 'onClick' | 'title' | 'className'>) {
   return (
     <SidebarMenuRow
+      {...rest}
       isActive={isActive}
       title={room.bridgeDisplayName ? `${room.name} · ${room.bridgeDisplayName}` : room.name}
       onMouseDown={(event) => event.preventDefault()}
