@@ -9,10 +9,12 @@ import { TRUSTED_RELEASE_KEYS } from './release-keys';
 import { publicKeyOf } from './release-signing';
 import { signRelease, testSigningKey } from './testing/release-signing';
 
+// A Windows checkout can turn install.sh's line endings into CRLF; what is
+// compared here is its text, so read it with LF either way.
 const installSh = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), '..', 'install.sh'),
   'utf8'
-);
+).replace(/\r\n/g, '\n');
 
 /** The text between `# BEGIN <name>` and `# END <name>` in install.sh, inside its single quotes. */
 function installShBlock(name: string): string {
