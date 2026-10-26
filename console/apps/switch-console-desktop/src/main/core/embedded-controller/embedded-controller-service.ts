@@ -117,7 +117,7 @@ type Runner = { supervisor: ControllerSupervisor; phase: EmbeddedControllerPhase
 
 /**
  * "Run managed agents on this computer", per signed-in Switch server: enrolls
- * this Console as an agents controller of kind `console`, keeps its credential
+ * this Console as an agent controller of kind `console`, keeps its credential
  * in the encrypted secrets store, and runs the agent-controller CLI as a
  * child process for as long as it is on.
  *
@@ -263,7 +263,7 @@ export class EmbeddedControllerService {
           await this.revokeQuietly(workspaceId, enrolled.controllerId);
           throw error;
         }
-        this.deps.log.info('Enrolled this computer as an agents controller', {
+        this.deps.log.info('Enrolled this computer as an agent controller', {
           serverId,
           controllerId: enrolled.controllerId,
         });
@@ -543,7 +543,7 @@ export class EmbeddedControllerService {
   private async onFinal(serverId: string, exit: ControllerFinalExit): Promise<void> {
     if (exit === 'upgrade_required') {
       this.deps.log.error(
-        'Switch needs a newer agents controller than this Console carries; not restarting it until Console is updated',
+        'Switch needs a newer agent controller than this Console carries; not restarting it until Console is updated',
         { serverId }
       );
       this.setRunnerPhase(serverId, {
