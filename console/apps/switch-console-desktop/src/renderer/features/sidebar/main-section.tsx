@@ -1,6 +1,7 @@
 import { DoorOpen, MessageCircle, X } from 'lucide-react';
 import { observer } from 'mobx-react-lite';
 import { useState } from 'react';
+import { UnreadBadge } from '@renderer/features/chats/components/unread-badge';
 import { ManagedAgentList } from '@renderer/features/managed-agents/managed-agent-list';
 import { useManagedAgents } from '@renderer/features/managed-agents/use-managed-agents';
 import { BuddyAvatar } from '@renderer/features/switch-buddy/buddy-avatar';
@@ -118,6 +119,7 @@ const RoomList = observer(function RoomList({ rooms }: { rooms: RemoteRoomSummar
       {rooms.map((room) => (
         <RoomListRow
           key={room.id}
+          roomId={room.id}
           room={room}
           isActive={isRoomViewActive(room.id)}
           onOpen={() => openRoomView(room.id)}
@@ -128,10 +130,12 @@ const RoomList = observer(function RoomList({ rooms }: { rooms: RemoteRoomSummar
 });
 
 export function RoomListRow({
+  roomId,
   room,
   isActive,
   onOpen,
 }: {
+  roomId: string;
   room: Pick<RemoteRoomSummary, 'name' | 'bridgeType' | 'bridgeDisplayName'>;
   isActive: boolean;
   onOpen: () => void;
@@ -150,6 +154,7 @@ export function RoomListRow({
         <DoorOpen className="size-[17px] shrink-0 text-[var(--fg-icon)]" />
       )}
       <span className="min-w-0 flex-1 truncate">{room.name}</span>
+      <UnreadBadge roomId={roomId} />
     </SidebarMenuRow>
   );
 }
