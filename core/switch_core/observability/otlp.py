@@ -142,6 +142,11 @@ class OtlpResource:
     several pods reports one series per pod rather than one series every pod
     overwrites. ``None`` for a resource that describes no single process, as
     product telemetry's does.
+
+    ``pod_name`` is the pod (or host) the process runs on, the same across its
+    restarts, which is what metric points are tagged with: the process id
+    changes on every start, so tagging with it would add a new set of series
+    each time.
     """
 
     service_name: str
@@ -151,6 +156,7 @@ class OtlpResource:
     commit_sha: str | None
     repository_url: str | None
     instance_id: str | None
+    pod_name: str | None = None
 
     def attributes(self) -> dict[str, AttributeValue]:
         values: dict[str, AttributeValue] = {
@@ -202,6 +208,19 @@ class MetricPayload:
     histograms: Sequence[HistogramPoint]
 
 
+def _point_attributes(
+    attributes: Mapping[str, AttributeValue], extra: Mapping[str, AttributeValue]
+) -> list[dict[str, Any]]:
+    """A point's own attributes plus the ones every point carries, refusing a
+    metric that already uses one of those names for something else."""
+    clash = attributes.keys() & extra.keys()
+    if clash:
+        raise ValueError(
+            f"Metric attribute(s) {sorted(clash)} are reserved for the process tags."
+        )
+    return otlp_attributes({**attributes, **extra})
+
+
 def _number_data_point(
     point: NumberPoint,
     start_nanos: int,
@@ -209,7 +228,7 @@ def _number_data_point(
     extra: Mapping[str, AttributeValue],
 ) -> dict[str, Any]:
     return {
-        "attributes": otlp_attributes({**point.attributes, **extra}),
+        "attributes": _point_attributes(point.attributes, extra),
         "startTimeUnixNano": str(start_nanos),
         "timeUnixNano": str(end_nanos),
         # `asDouble`, not `asInt`: int64 is a JSON string, which invites a
@@ -225,7 +244,7 @@ def _histogram_data_point(
     extra: Mapping[str, AttributeValue],
 ) -> dict[str, Any]:
     return {
-        "attributes": otlp_attributes({**point.attributes, **extra}),
+        "attributes": _point_attributes(point.attributes, extra),
         "startTimeUnixNano": str(start_nanos),
         "timeUnixNano": str(end_nanos),
         # fixed64 on the wire, so strings in JSON.
@@ -252,7 +271,7 @@ def _encode_metric(
         encoded["gauge"] = {
             "dataPoints": [
                 {
-                    "attributes": otlp_attributes({**point.attributes, **extra}),
+                    "attributes": _point_attributes(point.attributes, extra),
                     "timeUnixNano": str(end_nanos),
                     "asDouble": point.value,
                 }
@@ -289,13 +308,13 @@ def build_metrics_payload(
 ) -> dict[str, Any]:
     """One export interval's metrics as a single OTLP request body.
 
-    Every point also carries the process as `process_id`. The resource says
-    so too (`service.instance.id`), but Datadog does not make resource
+    Every point also carries its pod as `pod_name`. The resource names the
+    process (`service.instance.id`), but Datadog does not make resource
     attributes tags, so without it the pods of one deployment write the same
     series and each gauge shows whichever pod reported last.
     """
     extra: dict[str, AttributeValue] = (
-        {"process_id": resource.instance_id} if resource.instance_id else {}
+        {"pod_name": resource.pod_name} if resource.pod_name else {}
     )
     return {
         "resourceMetrics": [

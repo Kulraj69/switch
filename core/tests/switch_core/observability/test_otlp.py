@@ -107,9 +107,10 @@ def test_resource_names_the_process_so_pods_report_apart():
     assert resource.attributes()["service.instance.id"] == "switch-core-7d9f-abcd1234"
 
 
-def test_every_point_names_its_process_as_a_tag():
+def test_every_point_names_its_pod_as_a_tag():
     """Datadog makes point attributes tags but not resource ones, so two pods'
-    gauges would otherwise land in one series and overwrite each other."""
+    gauges would otherwise land in one series and overwrite each other. The
+    pod, not the process: the process id changes on every restart."""
     resource = OtlpResource(
         service_name="switch-core",
         service_version="1.2.3",
@@ -118,6 +119,7 @@ def test_every_point_names_its_process_as_a_tag():
         commit_sha=None,
         repository_url=None,
         instance_id="switch-core-7d9f-abcd1234",
+        pod_name="switch-core-7d9f",
     )
     gauge = MetricPayload(
         name="switch.agents.connected",
@@ -154,12 +156,36 @@ def test_every_point_names_its_process_as_a_tag():
         metrics[2]["histogram"]["dataPoints"],
     ):
         tags = {a["key"]: a["value"] for a in points[0]["attributes"]}
-        assert tags["process_id"] == {"stringValue": "switch-core-7d9f-abcd1234"}
+        assert tags["pod_name"] == {"stringValue": "switch-core-7d9f"}
     gauge_tags = {a["key"] for a in metrics[0]["gauge"]["dataPoints"][0]["attributes"]}
-    assert gauge_tags == {"transport", "process_id"}
+    assert gauge_tags == {"transport", "pod_name"}
 
 
-def test_points_carry_no_process_for_a_resource_without_one():
+def test_a_metric_attribute_cannot_take_the_pod_tag_s_name():
+    resource = OtlpResource(
+        service_name="switch-core",
+        service_version=None,
+        environment=None,
+        deployment_id=RESOURCE.deployment_id,
+        commit_sha=None,
+        repository_url=None,
+        instance_id="switch-core-7d9f-abcd1234",
+        pod_name="switch-core-7d9f",
+    )
+    gauge = MetricPayload(
+        name="switch.leases.held",
+        unit="{lease}",
+        description="Leases.",
+        kind="gauge",
+        numbers=[NumberPoint(attributes={"pod_name": "other"}, value=1.0)],
+        histograms=(),
+    )
+
+    with pytest.raises(ValueError, match="pod_name"):
+        build_metrics_payload([gauge], resource, START_NANOS, END_NANOS)
+
+
+def test_points_carry_no_pod_for_a_resource_without_one():
     payload = build_metrics_payload([_sum_metric()], RESOURCE, START_NANOS, END_NANOS)
     point = payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"][0]["sum"][
         "dataPoints"

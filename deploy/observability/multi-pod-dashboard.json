@@ -5,13 +5,18 @@
   "reflow_type": "fixed",
   "template_variables": [
     {
+      "name": "env",
+      "prefix": "env",
+      "default": "*"
+    },
+    {
       "name": "service",
       "prefix": "service",
       "default": "switch-core"
     },
     {
-      "name": "process_id",
-      "prefix": "process_id",
+      "name": "pod_name",
+      "prefix": "pod_name",
       "default": "*"
     }
   ],
@@ -19,7 +24,7 @@
     {
       "definition": {
         "type": "note",
-        "content": "**Is work split across the pods, and is nothing doubled?** Every series is per pod (`process_id`). With two pods, bridges, agents and pool use should split between them and sum to what one pod carried; events in vs out should keep the one-pod ratio. Pick the deployment with `service` (`switch-core` is pilot, `switch-core-dev` is development).",
+        "content": "**Is work split across the pods, and is nothing doubled?** Every series is per pod (`pod_name`). With two pods, bridges, agents and pool use should split between them and sum to what one pod carried; events in vs out should keep the one-pod ratio. Pick the deployment with `env` and `service`.",
         "background_color": "blue",
         "font_size": "14",
         "text_align": "left",
@@ -46,7 +51,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.bridges.running{$service,$process_id} by {process_id}"
+                "query": "sum:switch.bridges.running{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -78,7 +83,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.agents.connected{$service,$process_id} by {process_id}"
+                "query": "sum:switch.agents.connected{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -110,12 +115,12 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.consumers.running{$service,$process_id} by {process_id}"
+                "query": "sum:switch.consumers.running{$env,$service,$pod_name} by {pod_name}"
               },
               {
                 "data_source": "metrics",
                 "name": "q1",
-                "query": "sum:switch.connectors.running{$service,$process_id} by {process_id}"
+                "query": "sum:switch.connectors.running{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -150,12 +155,12 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.bridge.events_in{$service,$process_id}.as_count()"
+                "query": "sum:switch.bridge.events_in{$env,$service,$pod_name}.as_count()"
               },
               {
                 "data_source": "metrics",
                 "name": "q1",
-                "query": "sum:switch.bridge.events_out{$service,$process_id}.as_count()"
+                "query": "sum:switch.bridge.events_out{$env,$service,$pod_name}.as_count()"
               }
             ],
             "response_format": "timeseries",
@@ -190,12 +195,12 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.messages.sent{$service,$process_id}.as_count()"
+                "query": "sum:switch.messages.sent{$env,$service,$pod_name}.as_count()"
               },
               {
                 "data_source": "metrics",
                 "name": "q1",
-                "query": "sum:switch.messages.delivered{$service,$process_id}.as_count()"
+                "query": "sum:switch.messages.delivered{$env,$service,$pod_name}.as_count()"
               }
             ],
             "response_format": "timeseries",
@@ -230,7 +235,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.messages.delivery_lag{$service,$process_id} by {process_id}"
+                "query": "max:switch.messages.delivery_lag{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -262,7 +267,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.db.pool.in_use{$service,$process_id} by {process_id}"
+                "query": "max:switch.db.pool.in_use{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -294,7 +299,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.db.pool.wait.duration{$service,$process_id} by {process_id}"
+                "query": "max:switch.db.pool.wait.duration{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -326,7 +331,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.db.server.connections{$service}"
+                "query": "max:switch.db.server.connections{$env,$service}"
               }
             ],
             "response_format": "timeseries",
@@ -358,7 +363,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.runtime.cpu_seconds{$service,$process_id} by {process_id}.as_rate()"
+                "query": "sum:switch.runtime.cpu_seconds{$env,$service,$pod_name} by {pod_name}.as_rate()"
               }
             ],
             "response_format": "timeseries",
@@ -390,7 +395,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.runtime.memory_rss{$service,$process_id} by {process_id}"
+                "query": "max:switch.runtime.memory_rss{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -422,7 +427,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.runtime.event_loop_lag{$service,$process_id} by {process_id}"
+                "query": "max:switch.runtime.event_loop_lag{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",
@@ -454,7 +459,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.bridge.errors{$service,$process_id} by {process_id}.as_count()"
+                "query": "sum:switch.bridge.errors{$env,$service,$pod_name} by {pod_name}.as_count()"
               }
             ],
             "response_format": "timeseries",
@@ -486,7 +491,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "sum:switch.db.server.transactions{$service}.as_rate()"
+                "query": "avg:switch.db.server.transactions{$env,$service}.as_rate()"
               }
             ],
             "response_format": "timeseries",
@@ -518,7 +523,7 @@
               {
                 "data_source": "metrics",
                 "name": "q0",
-                "query": "max:switch.db.query.duration{$service,$process_id} by {process_id}"
+                "query": "max:switch.db.query.duration{$env,$service,$pod_name} by {pod_name}"
               }
             ],
             "response_format": "timeseries",

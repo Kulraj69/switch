@@ -118,7 +118,13 @@ it.
 
 ## Across pods
 
-`multi-pod-dashboard.json` splits every panel by pod (`process_id`), to see
-whether work is shared between switch-core pods and whether anything is
-handled twice. Pick the deployment with `service`. It needs a build that tags
-points with `process_id`; earlier builds show one unsplit series.
+`multi-pod-dashboard.json` shows switch-core per pod (`pod_name`), to see
+whether work is shared between pods and whether anything is handled twice.
+Gauges are split by pod; platform events, messages and the database server's
+own counters show one total. Pick the deployment with `env` and `service`. It
+needs a build that tags points with `pod_name`; earlier builds show one
+unsplit series.
+
+`dashboard.json` sums per-pod gauges (consumers, connectors, pool, memory) so
+its totals stay totals with several pods, and the pool-saturation monitor
+alerts per pod, since one pod can exhaust its pool while the others idle.
