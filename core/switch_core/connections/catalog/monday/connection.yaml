@@ -1,0 +1,55 @@
+slug: monday
+name: monday.com
+category: Project management
+description: Read and update monday.com boards and items, as you.
+enabled: true
+adapter: oauth
+auth:
+  type: oauth
+  # TODO(measure): whether a refresh returns a new refresh token. Treated as
+  # rotating until a live sign-in shows otherwise; rotating is the safe guess.
+  refresh: rotating
+  oauth:
+    # monday offers dynamic registration for its MCP server, but a client it
+    # has not pre-approved connects only after the account admin approves it
+    # and its redirect URIs under Dynamic connectors. Switch names exact
+    # loopback ports so the admin approves a fixed, short list.
+    registration: dynamic
+    redirect: [loopback]
+    loopback_ports: [39231, 39232, 39233, 39234, 39235]
+    revocation_discovered: true
+  identity:
+    # monday's API is GraphQL; it answers a GET with the query in the URL.
+    url: https://api.monday.com/v2?query=%7Bme%7Bid%20email%7D%7D
+    account_id: data.me.id
+    label: data.me.email
+# TODO(measure): the MCP access token's lifetime. An hour until measured.
+token: { kind: pass_through, max_lifetime: 3600 }
+mcp:
+  servers:
+    - { name: monday, url: "https://mcp.monday.com/mcp" }
+access:
+  # Every call runs as the person who connected and reaches only what they can
+  # see. Not asked for: account, team and user admin scopes, webhooks, and
+  # workspaces:write (creating and deleting workspaces). boards:write includes
+  # deleting items and boards; the skill asks before any delete.
+  read:
+    scopes:
+      - me:read
+      - users:read
+      - workspaces:read
+      - boards:read
+      - updates:read
+      - docs:read
+  write:
+    scopes:
+      - me:read
+      - users:read
+      - workspaces:read
+      - boards:read
+      - boards:write
+      - updates:read
+      - updates:write
+      - docs:read
+      - docs:write
+tools: { mode: pass_through }

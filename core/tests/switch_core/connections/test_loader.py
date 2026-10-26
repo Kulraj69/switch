@@ -32,6 +32,7 @@ def test_shipped_catalog_enables_github_airtable_atlassian_datadog_and_google_wo
         "atlassian",
         "datadog",
         "google-workspace",
+        "monday",
     }
     assert [slug for slug, entry in CATALOG.items() if entry.definition.enabled] == [
         "airtable",
@@ -39,12 +40,14 @@ def test_shipped_catalog_enables_github_airtable_atlassian_datadog_and_google_wo
         "datadog",
         "github",
         "google-workspace",
+        "monday",
     ]
     assert all(not CATALOG[slug].skill_files for slug in PLACEHOLDERS)
     assert "SKILL.md" in CATALOG["github"].skill_files
     assert "SKILL.md" in CATALOG["airtable"].skill_files
     assert "SKILL.md" in CATALOG["atlassian"].skill_files
     assert "SKILL.md" in CATALOG["google-workspace"].skill_files
+    assert "SKILL.md" in CATALOG["monday"].skill_files
 
 
 GOOGLE = "https://www.googleapis.com/auth/"
@@ -225,6 +228,49 @@ def test_the_shipped_airtable_entry_signs_in_as_the_spike_found_it_must():
     assert definition.auth.identity is not None
     assert definition.auth.identity.url == "https://api.airtable.com/v0/meta/whoami"
     assert definition.auth.identity.account_id == "id"
+
+
+def test_the_shipped_monday_entry_signs_in_as_its_mcp_server_advertises():
+    definition = CATALOG["monday"].definition
+    oauth = definition.auth.oauth
+    assert oauth is not None
+    # monday's MCP server advertises dynamic registration, PKCE S256 and a
+    # revocation endpoint; an account admin approves the client and its
+    # redirect URIs, so the loopback ports are a fixed list.
+    assert (definition.adapter, oauth.registration, oauth.redirect) == (
+        "oauth",
+        "dynamic",
+        ["loopback"],
+    )
+    assert oauth.loopback_ports == [39231, 39232, 39233, 39234, 39235]
+    assert oauth.revocation_discovered is True
+    assert oauth.authorization_url is None and oauth.revocation_url is None
+    assert definition.token is not None
+    assert definition.token.kind == "pass_through"
+    assert definition.mcp is not None
+    assert [(s.name, s.url) for s in definition.mcp.servers] == [
+        ("monday", "https://mcp.monday.com/mcp")
+    ]
+    assert definition.access is not None and definition.access.write is not None
+    read = definition.access.read.scopes or []
+    write = definition.access.write.scopes or []
+    # The read level changes nothing, and write only adds to it.
+    assert not [scope for scope in read if scope.endswith(":write")]
+    assert set(read) < set(write)
+    assert set(write) - set(read) == {"boards:write", "updates:write", "docs:write"}
+    # Never the admin scopes, or the one that creates and deletes workspaces.
+    for scope in (
+        "account:read",
+        "users:write",
+        "teams:write",
+        "webhooks:write",
+        "workspaces:write",
+    ):
+        assert scope not in write
+    identity = definition.auth.identity
+    assert identity is not None
+    assert identity.url.startswith("https://api.monday.com/v2?query=")
+    assert (identity.account_id, identity.label) == ("data.me.id", "data.me.email")
 
 
 @pytest.fixture
