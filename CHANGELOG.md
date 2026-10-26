@@ -151,6 +151,12 @@ version of their own to them without also giving them a release of their own.
   Existing duplicates are left as they are and can be reached by id.
 
 #### Fixed
+- **The agent HTTP API answers a refused or malformed request with a 4xx, not
+  a 500.** Inviting an agent to a room the caller may not change answered 500
+  instead of 403, and so did looking up a room the agent is not in. A room
+  history request whose `since` or `before` is not an ISO 8601 timestamp
+  answered 500 instead of 400; it now says which parameter was wrong, and so
+  does `read_context` (#1045).
 - **Full garbage collections no longer stall the server for hundreds of
   milliseconds.** Once boot has built what lasts for the life of the process
   (modules, the ORM's mappers, the app's routes), the server freezes it out of
