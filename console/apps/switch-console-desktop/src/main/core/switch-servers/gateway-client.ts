@@ -40,6 +40,7 @@ import {
   connectorAppImpactSchema,
   connectorAppRefusalSchema,
   connectorAppSchema,
+  savedConnectorAppSchema,
   connectorAppsSchema,
 } from '@shared/core/switch-servers/connector-apps';
 import {
@@ -3309,7 +3310,8 @@ export async function saveConnectorApp(
     }
     throw cause;
   }
-  return { kind: 'saved', app: connectorAppSchema.parse(await response.json()) };
+  const saved = savedConnectorAppSchema.parse(await response.json());
+  return { kind: 'saved', app: connectorAppSchema.parse(saved), checks: saved.checks };
 }
 
 function safeJson(body: string): unknown {
