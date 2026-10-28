@@ -2,7 +2,8 @@ slug: monday
 name: monday.com
 category: Project management
 description: Read and update monday.com boards and items, as you.
-enabled: true
+# DCR permissions and identity compatibility need live verification before use.
+enabled: false
 adapter: oauth
 auth:
   type: oauth
@@ -19,7 +20,7 @@ auth:
     loopback_ports: [39231, 39232, 39233, 39234, 39235]
     revocation_discovered: true
   identity:
-    # monday's API is GraphQL; it answers a GET with the query in the URL.
+    # Candidate only: GraphQL GET and MCP-token compatibility are unverified.
     url: https://api.monday.com/v2?query=%7Bme%7Bid%20email%7D%7D
     account_id: data.me.id
     label: data.me.email
@@ -29,10 +30,8 @@ mcp:
   servers:
     - { name: monday, url: "https://mcp.monday.com/mcp" }
 access:
-  # Every call runs as the person who connected and reaches only what they can
-  # see. Not asked for: account, team and user admin scopes, webhooks, and
-  # workspaces:write (creating and deleting workspaces). boards:write includes
-  # deleting items and boards; the skill asks before any delete.
+  # Requested scopes only. DCR inherits user permissions; these lists do not
+  # prove read-only enforcement. Switch passes through the original token.
   read:
     scopes:
       - me:read

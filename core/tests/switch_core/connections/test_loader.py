@@ -40,14 +40,13 @@ def test_shipped_catalog_enables_github_airtable_atlassian_datadog_and_google_wo
         "datadog",
         "github",
         "google-workspace",
-        "monday",
     ]
     assert all(not CATALOG[slug].skill_files for slug in PLACEHOLDERS)
     assert "SKILL.md" in CATALOG["github"].skill_files
     assert "SKILL.md" in CATALOG["airtable"].skill_files
     assert "SKILL.md" in CATALOG["atlassian"].skill_files
     assert "SKILL.md" in CATALOG["google-workspace"].skill_files
-    assert "SKILL.md" in CATALOG["monday"].skill_files
+    assert not CATALOG["monday"].skill_files
 
 
 GOOGLE = "https://www.googleapis.com/auth/"
@@ -230,8 +229,9 @@ def test_the_shipped_airtable_entry_signs_in_as_the_spike_found_it_must():
     assert definition.auth.identity.account_id == "id"
 
 
-def test_the_shipped_monday_entry_signs_in_as_its_mcp_server_advertises():
+def test_monday_candidate_stays_disabled_pending_live_verification():
     definition = CATALOG["monday"].definition
+    assert definition.enabled is False
     oauth = definition.auth.oauth
     assert oauth is not None
     # monday's MCP server advertises dynamic registration, PKCE S256 and a
@@ -254,11 +254,11 @@ def test_the_shipped_monday_entry_signs_in_as_its_mcp_server_advertises():
     assert definition.access is not None and definition.access.write is not None
     read = definition.access.read.scopes or []
     write = definition.access.write.scopes or []
-    # The read level changes nothing, and write only adds to it.
+    # These are requested scopes, not proof of vendor-enforced permissions.
     assert not [scope for scope in read if scope.endswith(":write")]
     assert set(read) < set(write)
     assert set(write) - set(read) == {"boards:write", "updates:write", "docs:write"}
-    # Never the admin scopes, or the one that creates and deletes workspaces.
+    # The requested list omits admin and workspace-write scopes.
     for scope in (
         "account:read",
         "users:write",
