@@ -117,12 +117,16 @@ def test_unverified_monday_is_not_available_for_sign_in() -> None:
 
 
 def test_disabled_monday_is_rejected_by_the_broker_without_io() -> None:
-    broker = _broker(CATALOG, async_sessionmaker(), {}, None)
+    def no_session():
+        pytest.fail("A disabled service must not open a database session")
+
+    broker = _broker(CATALOG, no_session, {}, None)
     assert broker.connectable("monday") is False
-    with pytest.raises(ServiceError) as refused:
-        broker._entry("monday")
-    assert refused.value.status_code == 404
-    assert refused.value.retryable is False
+    for lookup in (broker._entry, broker.sign_in):
+        with pytest.raises(ServiceError) as refused:
+            lookup("monday")
+        assert refused.value.status_code == 404
+        assert refused.value.retryable is False
 
 
 def test_monday_candidate_registration_declares_fixed_redirects_and_scopes() -> None:
