@@ -749,9 +749,9 @@ async def test_the_rooms_wait_until_the_new_agents_are_listening(managed):
     order: list[str] = []
     names: dict[str, str] = {}
 
-    async def create_room(config: Any) -> Any:
+    async def create_room(config: Any, **kwargs: Any) -> Any:
         order.append(f"room {config.name}")
-        return await original(config)
+        return await original(config, **kwargs)
 
     original = managed["protocol"].room_service.create_room
     managed["protocol"].room_service.create_room = create_room
